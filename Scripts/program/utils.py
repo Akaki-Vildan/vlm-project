@@ -1,6 +1,7 @@
 import os
 import re
 import tempfile
+import math
 
 import numpy as np
 import cv2
@@ -37,7 +38,7 @@ def send_a_request(prompt_text, image_data):
         image_to_send = image_data
 
     try:
-        pred = model.inference(prompt_text, image_to_send, task="pointing")
+        pred = model.inference(prompt_text, image_to_send, task="positioning", do_sample=True, temperature=0.7) #positioning
         return pred
     finally:
         if temp_file_path is not None and os.path.exists(temp_file_path):
@@ -54,13 +55,38 @@ def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
         print(f"[UTILS] Could not parse pixel coords from pred: {pred}")
         return None
 
-    px_vlm, py_vlm = nums[0], nums[1]
-    print(f"[UTILS] VLM pixel: x={px_vlm}, y={py_vlm}")
+    px_vlm, py_vlm, ang = nums[0], nums[1], nums[3]
+    print(f"[UTILS] VLM pixel: x={px_vlm}, y={py_vlm}, angle={ang}")
 
     coord_camera = camera.pixel_to_camera_3d(
         depth_image, depth_scale, intrin, px_vlm, py_vlm, img)
     if coord_camera is None:
         return None
 
+
+    px = int(round(px_vlm / 1000 * 640))
+    py = int(round(py_vlm / 1000 * 480))
+
+    n_ang = transform_1000_to_640(px_vlm, py_vlm, ang)
+
+    print(f"[UTILS] VLM pixel: x={px_vlm}, y={py_vlm}, angle={ang}, new_angle={n_ang}")
+
     print(f"[UTILS] Camera 3D coords: {coord_camera}")
-    return robot.get_pos_from_cord(coord_camera, img)
+    return robot.get_pos_from_cord(coord_camera, img, n_ang, pixel_center=[px, py])
+
+
+
+def transform_1000_to_640(x, y, a):
+    distance = 10
+
+    x2 = x + distance * math.cos(a)
+    y2 = y + distance * math.sin(a)
+
+    x = x / 1000 * 640
+    y = y / 1000 * 480
+    x2 = x2 / 1000 * 640
+    y2 = y2 / 1000 * 480
+
+    n_a = math.atan2(y2 - y, x2 - x)
+
+    return n_a

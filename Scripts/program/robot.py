@@ -37,7 +37,7 @@ H_tcp_to_cam_file = np.array([
 H_cam_to_tcp = np.linalg.inv(H_tcp_to_cam_file)
 
 # --- Параметры робота ---
-HOME_POS   = position([-0.4, 0.0, 0.5], [math.pi, 0, -math.pi / 2])
+HOME_POS   = position([-0.4, 0.0, 0.3], [math.pi, 0, -math.pi / 2])
 HOME_POS_1 = position([-0.4, 0.1, 0.3], [math.pi, 0, -math.pi / 2])
 MOVE_SPEED = 25       # град/с для MT_JOINT
 MOVE_VELOCITY = 0.1   # м/с для MT_LINEAR
@@ -67,15 +67,18 @@ time.sleep(0.5)
 robot.set_digital_output_low(1)
 
 
-def get_pos_from_cord(coord_camera, image, clamp_to_table=False):
+
+def get_pos_from_cord(coord_camera, image, ang, pixel_center=None, clamp_to_table=False):
     """
     Преобразует точку из оптического фрейма камеры [X_cam, Y_cam, Z_cam]
     в целевую позицию робота (base), показывает превью и ждёт C/Q.
 
     :param coord_camera: [X_cam, Y_cam, Z_cam] в метрах
     :param image: кадр для отображения
-    :param clamp_to_table: True -> Z фиксируется на TABLE_Z (надёжнее),
-                           False -> Z из глубины + TARGET_OFFSET_Z (как в старом коде)
+    :param ang: угол поворота (в РАДИАНАХ)
+    :param pixel_center: [x, y] - координаты центра объекта на изображении (в пикселях)
+    :param clamp_to_table: True -> Z фиксируется на TABLE_Z,
+                           False -> Z из глубины + TARGET_OFFSET_Z
     :return: объект position, либо None при отмене
     """
     # 1. Текущая поза TCP
@@ -95,9 +98,6 @@ def get_pos_from_cord(coord_camera, image, clamp_to_table=False):
     point_tcp_xyz = (H_cam_to_tcp @ point_cam_h)[:3]
 
     # 3. TCP -> base.
-    # КЛЮЧЕВОЙ МОМЕНТ: yaw инвертируется ТОЛЬКО для построения матрицы поворота.
-    # Конвенция yaw у Pulse противоположна scipy 'xyz' (extrinsic RPY).
-    # Именно эту инверсию потерял VLM-код относительно рабочего YOLO-пайплайна.
     rot_for_matrix = [roll, pitch, -yaw]
     R_base_tcp = R_scipy.from_euler('xyz', rot_for_matrix, degrees=False).as_matrix()
 
@@ -114,20 +114,50 @@ def get_pos_from_cord(coord_camera, image, clamp_to_table=False):
     else:
         target_z = point_base_xyz[2] + TARGET_OFFSET_Z
     target_pos_base = [point_base_xyz[0], point_base_xyz[1], target_z]
+    target_pos_base_5 = [point_base_xyz[0], point_base_xyz[1], target_z + 0.05]
+    target_pos_base_1 = [point_base_xyz[0], point_base_xyz[1], target_z - 0.02]
 
-    # Ориентацию роботу командуем РЕАЛЬНУЮ текущую (yaw НЕ инвертируем).
-    output_rot = [roll, pitch, yaw]
+    # ================= ВЫЧИСЛЕНИЕ УГЛА =================
+    if ang > 0:
+        ang += math.pi / 2
+    else:
+        ang -= math.pi / 2
+
+    # target_yaw_rad = ((ang + math.pi) % (2 * math.pi))
+    target_yaw_rad = ang 
+    target_yaw_deg = math.degrees(target_yaw_rad)
+
+    print(f"[ROBOT] Target Yaw from camera (rad): {target_yaw_rad:.4f}, (deg): {target_yaw_deg:.2f}")
+
+    output_rot = [roll, pitch, target_yaw_rad]
+
+
 
     # 5. Визуализация и подтверждение
     if image is not None:
         disp = image.copy()
+
+        # Рисуем точку и линию угла
+        if pixel_center is not None:
+            cx, cy = int(pixel_center[0]), int(pixel_center[1])
+            
+            # Точка в центре объекта
+            cv2.circle(disp, (cx, cy), 5, (0, 255, 0), -1)
+            
+            # Линия-указатель направления
+            line_length = 50
+            end_x = int(cx + line_length * math.cos(target_yaw_rad))
+            end_y = int(cy - line_length * math.sin(target_yaw_rad))
+            cv2.line(disp, (cx, cy), (end_x, end_y), (0, 255, 0), 2)
+
         lines = [
             f"Target Base Coord: ({target_pos_base[0]:.3f}, "
             f"{target_pos_base[1]:.3f}, {target_pos_base[2]:.3f})",
             f"Target Rotation (RPY): ({output_rot[0]:.2f}, "
             f"{output_rot[1]:.2f}, {output_rot[2]:.2f})",
+            f"Target Yaw (from cam): {target_yaw_deg:.2f} deg",
         ]
-        y_off = disp.shape[0] - 60
+        y_off = disp.shape[0] - 80
         for text in reversed(lines):
             cv2.putText(disp, text, (10, y_off),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
@@ -141,7 +171,7 @@ def get_pos_from_cord(coord_camera, image, clamp_to_table=False):
         key = cv2.waitKey(0) & 0xFF
         cv2.destroyAllWindows()
 
-        if key in (ord('q'), ord('Q'), 27):  # 27 = ESC
+        if key in (ord('q'), ord('Q'), 27):
             print("[ROBOT] User chose to quit. Aborting movement.")
             return None
         if key not in (ord('c'), ord('C')):
@@ -151,7 +181,7 @@ def get_pos_from_cord(coord_camera, image, clamp_to_table=False):
 
     print(f"[ROBOT] Final target position of the cube: {target_pos_base}, "
           f"rotation: {output_rot}")
-    return position(target_pos_base, output_rot)
+    return [position(target_pos_base, output_rot), position(target_pos_base_5, output_rot), position(target_pos_base_1, output_rot)]
 
 
 def move_robot_to_pos(target):
@@ -159,6 +189,38 @@ def move_robot_to_pos(target):
     print(f"[ROBOT] robot next position: {target}")
     x = int(input('0 - leave, 1 - continue: '))
     if x == 1:
-        robot.set_position(target, tcp_max_velocity=MOVE_VELOCITY, motion_type=MT_LINEAR)
+        robot.set_position(target[1], tcp_max_velocity=MOVE_VELOCITY, motion_type=MT_LINEAR)
         robot.await_stop()
         time.sleep(0.5)
+        x = int(input('0 - leave, 1 - continue: '))
+        if(x == 1):
+            robot.set_position(target[0], tcp_max_velocity=MOVE_VELOCITY, motion_type=MT_LINEAR)
+            robot.await_stop()
+            time.sleep(0.5)
+            x = int(input('0 - leave, 1 - continue: '))
+            if(x == 1):
+                robot.set_position(target[2], tcp_max_velocity=MOVE_VELOCITY, motion_type=MT_LINEAR)
+                robot.await_stop()
+                time.sleep(0.5)
+                robot.set_digital_output_high(1) 
+                robot.await_stop()
+                time.sleep(0.5)
+                robot.set_position(HOME_POS, tcp_max_velocity=MOVE_VELOCITY, motion_type=MT_LINEAR)
+                robot.await_stop()
+                time.sleep(0.5)
+            else:
+                robot.set_position(HOME_POS, tcp_max_velocity=MOVE_VELOCITY, motion_type=MT_LINEAR)
+                robot.await_stop()
+                time.sleep(0.5)
+                robot.set_digital_output_low(1)
+        else:
+            robot.set_position(HOME_POS, tcp_max_velocity=MOVE_VELOCITY, motion_type=MT_LINEAR)
+            robot.await_stop()
+            time.sleep(0.5)
+            robot.set_digital_output_low(1)
+    else: 
+        robot.set_position(HOME_POS, tcp_max_velocity=MOVE_VELOCITY, motion_type=MT_LINEAR)
+    robot.await_stop()
+    time.sleep(0.5)
+    robot.set_digital_output_low(1)
+                        
