@@ -23,6 +23,17 @@ print("[STATUS] Loading local model weights...")
 model = UnifiedInference(LOCAL_MODEL_PATH)
 
 
+class object:
+
+    def __init__(self, coords_vlm, coords_image = None, coords_camera = None, coords_robot = None, angle = None):
+        self.coords_vlm = coords_vlm,
+        self.coords_image = coords_image, 
+        self.coords_camera = coords_camera, 
+        self.coords_robot = coords_robot, 
+        self.angle = angle
+
+
+
 def send_a_request(prompt_text, image_data):
     print("[STATUS] Sending request to model... This might take a moment.")
     temp_file_path = None
@@ -38,7 +49,7 @@ def send_a_request(prompt_text, image_data):
         image_to_send = image_data
 
     try:
-        pred = model.inference(prompt_text, image_to_send, task="positioning", do_sample=True, temperature=0.7) #positioning
+        pred = model.inference(prompt_text, image_to_send, task="positioning", do_sample=False, temperature=0.7) #positioning
         return pred
     finally:
         if temp_file_path is not None and os.path.exists(temp_file_path):
@@ -69,10 +80,12 @@ def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
 
     n_ang = transform_1000_to_640(px_vlm, py_vlm, ang)
 
+    angle = get_angle(px)
+
     print(f"[UTILS] VLM pixel: x={px_vlm}, y={py_vlm}, angle={ang}, new_angle={n_ang}")
 
     print(f"[UTILS] Camera 3D coords: {coord_camera}")
-    return robot.get_pos_from_cord(coord_camera, img, n_ang, pixel_center=[px, py])
+    return robot.get_pos_from_cord(coord_camera, img, ang, pixel_center=[px, py])
 
 
 
@@ -90,3 +103,4 @@ def transform_1000_to_640(x, y, a):
     n_a = math.atan2(y2 - y, x2 - x)
 
     return n_a
+

@@ -37,7 +37,7 @@ H_tcp_to_cam_file = np.array([
 H_cam_to_tcp = np.linalg.inv(H_tcp_to_cam_file)
 
 # --- Параметры робота ---
-HOME_POS   = position([-0.4, 0.0, 0.3], [math.pi, 0, -math.pi / 2])
+HOME_POS   = position([-0.4, 0.0, 0.5], [math.pi, 0, -math.pi / 2])
 HOME_POS_1 = position([-0.4, 0.1, 0.3], [math.pi, 0, -math.pi / 2])
 MOVE_SPEED = 25       # град/с для MT_JOINT
 MOVE_VELOCITY = 0.1   # м/с для MT_LINEAR

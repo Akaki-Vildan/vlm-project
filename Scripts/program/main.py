@@ -38,6 +38,7 @@ def main():
         if robot_position is not None:
             print(f"Final point: {robot_position}")
             robot.move_robot_to_pos(robot_position)
+
             
     else:
         print("[MAIN] No prediction available, skipping robot command.")
