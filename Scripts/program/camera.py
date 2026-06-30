@@ -1,6 +1,7 @@
 import pyrealsense2 as rs
 import numpy as np
 import cv2
+from main import objects
 
 # Camera settings
 CAMERA_WIDTH = 640
@@ -59,11 +60,10 @@ def start_stream():
 
         if key == ord('p'):
             #prompt = "get center of the black little cube"
-            prompt = input('Get prompt: ')
             pipeline.stop()
             cv2.destroyAllWindows()
             # .copy() — отвязываемся от внутреннего буфера RealSense
-            return color_image.copy(), prompt, depth_image.copy(), depth_scale, intrin
+            return color_image.copy(), depth_image.copy(), depth_scale, intrin
 
         elif key == ord('q'):
             print("Cancelled.")
@@ -72,27 +72,17 @@ def start_stream():
             return None, None, None, None, None
 
 
-def pixel_to_camera_3d(depth_image, depth_scale, intrin, px_vlm, py_vlm, color_image):
+def pixel_to_camera_3d(depth_image, depth_scale, intrin, color_image):
     """
     Депроецирует пиксель (в системе VLM, 1000x1000) в 3D точку (м) в оптическом
     фрейме камеры. Медиана глубины по окну для устойчивости к шуму/нулям.
     """
-    # VLM 1000x1000 -> разрешение камеры
-    px = int(round(px_vlm / VLM_SPACE * CAMERA_WIDTH))
-    py = int(round(py_vlm / VLM_SPACE * CAMERA_HEIGHT))
-    px = max(0, min(px, CAMERA_WIDTH - 1))
-    py = max(0, min(py, CAMERA_HEIGHT - 1))
 
-    # Превью точки
-    cv2.circle(color_image, (px, py), 5, (0, 0, 255), -1)
-    cv2.imshow("Check the cube center", color_image)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
 
     # Медиана глубины по окну 11x11, игнорируя нули
     half = 5
-    y0, y1 = max(0, py - half), min(CAMERA_HEIGHT, py + half + 1)
-    x0, x1 = max(0, px - half), min(CAMERA_WIDTH, px + half + 1)
+    y0, y1 = max(0, objects[0].coords_image["y"] - half), min(CAMERA_HEIGHT, objects[0].coords_image["y"] + half + 1)
+    x0, x1 = max(0, objects[0].coords_image["x"] - half), min(CAMERA_WIDTH, objects[0].coords_image["x"] + half + 1)
     window = depth_image[y0:y1, x0:x1].astype(np.float32) * depth_scale
     valid = window[window > 0]
     if valid.size == 0:
@@ -100,8 +90,12 @@ def pixel_to_camera_3d(depth_image, depth_scale, intrin, px_vlm, py_vlm, color_i
         return None
     depth = float(np.median(valid))
 
-    print(f"[CAMERA] point in 3D: ({px}, {py}, {depth:.4f})")
+    print(f"[CAMERA] point in 3D: ({objects[0].coords_image["x"]}, {objects[0].coords_image["y"]}, {depth:.4f})")
 
     # Депроекция: пиксель + глубина -> 3D точка в оптическом фрейме камеры
-    point_3d = rs.rs2_deproject_pixel_to_point(intrin, [px, py], depth)
-    return list(point_3d)  # [x, y, z]
+    point_3d = rs.rs2_deproject_pixel_to_point(intrin, [objects[0].coords_image["x"], objects[0].coords_image["y"]], depth)
+    res = list(point_3d)
+    objects[0].coords_camera["x"] = res[0]
+    objects[0].coords_camera["y"] = res[1]
+    objects[0].coords_camera["z"] = res[2]
+    return 

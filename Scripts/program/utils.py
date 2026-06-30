@@ -2,6 +2,7 @@ import os
 import re
 import tempfile
 import math
+from main import objects
 
 import numpy as np
 import cv2
@@ -24,17 +25,45 @@ model = UnifiedInference(LOCAL_MODEL_PATH)
 
 
 class object:
+    """
+    A class of object, with each we work at this moment
+    Params:
+        coords_vln - it is a coordinates, wich we have from vlm i.e. in 1000 x 1000 image
+        coords_image - it's a vlm coordinated transformed in our image shape
+        coords_camera - it's a coordinates in camera system returns in meters and calculates using image. Where are x, y and z coords
+        coors_root - it's coordinates in base system
+        angle - rotation angle
+    """
 
-    def __init__(self, coords_vlm, coords_image = None, coords_camera = None, coords_robot = None, angle = None):
-        self.coords_vlm = coords_vlm,
-        self.coords_image = coords_image, 
-        self.coords_camera = coords_camera, 
-        self.coords_robot = coords_robot, 
+    def __init__(self,
+                 name = None, 
+                 coords_vlm = None, #px_vlm
+                 coords_camera = None, #px
+                 coords_robot = None, 
+                 angle = None):
+                 
+        self.name = name
+        self.coords_vlm = coords_vlm
+        self.coords_image = {
+            "x": 0, 
+            "y": 0, 
+            "z": 0
+        }
+        self.coords_camera = coords_camera
+        self.coords_robot = coords_robot
         self.angle = angle
 
 
+        self.coords_image["x"] = int(round(self.coords_vlm["x"] / camera.VLM_SPACE * camera.CAMERA_WIDTH))
+        self.coords_image["y"] = int(round(self.coords_vlm["y"] / camera.VLM_SPACE * camera.CAMERA_HEIGHT))
 
-def send_a_request(prompt_text, image_data):
+
+
+
+def send_a_request(prompt_text, image_data, task, do_sample=True, temperature=0.7):
+    '''
+    tasks: "general", "pointing", "trajectory", "grounding", "positioning"
+    '''
     print("[STATUS] Sending request to model... This might take a moment.")
     temp_file_path = None
 
@@ -49,7 +78,7 @@ def send_a_request(prompt_text, image_data):
         image_to_send = image_data
 
     try:
-        pred = model.inference(prompt_text, image_to_send, task="positioning", do_sample=False, temperature=0.7) #positioning
+        pred = model.inference(prompt_text, image_to_send, task=task, do_sample=do_sample, temperature=temperature) 
         return pred
     finally:
         if temp_file_path is not None and os.path.exists(temp_file_path):
@@ -57,6 +86,7 @@ def send_a_request(prompt_text, image_data):
 
 
 def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
+    new_obj = object()
     """
     Парсит пиксельные координаты из ответа VLM, депроецирует в 3D
     и переводит в позицию робота.
@@ -66,41 +96,28 @@ def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
         print(f"[UTILS] Could not parse pixel coords from pred: {pred}")
         return None
 
-    px_vlm, py_vlm, ang = nums[0], nums[1], nums[3]
-    print(f"[UTILS] VLM pixel: x={px_vlm}, y={py_vlm}, angle={ang}")
+    new_obj.coords_vlm["x"], new_obj.coords_vlm["y"], ang = nums[0], nums[1], nums[3]
+    print(f"[UTILS] VLM pixel: x={new_obj.coords_vlm["x"]}, y={new_obj.coords_vlm["y"]}, angle={ang}")
 
-    coord_camera = camera.pixel_to_camera_3d(
-        depth_image, depth_scale, intrin, px_vlm, py_vlm, img)
-    if coord_camera is None:
+    objects.append(new_obj)
+
+    camera.pixel_to_camera_3d(
+        depth_image, depth_scale, intrin, img)
+    if objects[0].coords_camera is None:
         return None
 
 
-    px = int(round(px_vlm / 1000 * 640))
-    py = int(round(py_vlm / 1000 * 480))
-
-    n_ang = transform_1000_to_640(px_vlm, py_vlm, ang)
-
-    angle = get_angle(px)
-
-    print(f"[UTILS] VLM pixel: x={px_vlm}, y={py_vlm}, angle={ang}, new_angle={n_ang}")
-
-    print(f"[UTILS] Camera 3D coords: {coord_camera}")
-    return robot.get_pos_from_cord(coord_camera, img, ang, pixel_center=[px, py])
+    print(f"[UTILS] Camera 3D coords: {objects[0].coords_camera}")
+    return robot.get_pos_from_cord(img, ang)
 
 
 
-def transform_1000_to_640(x, y, a):
-    distance = 10
+def get_an_angle():
+    prompt = f"Get an agle, of the {objects[0].name}"
+    image, depth_image, depth_scale, intrin = camera.start_stream()
 
-    x2 = x + distance * math.cos(a)
-    y2 = y + distance * math.sin(a)
+    
 
-    x = x / 1000 * 640
-    y = y / 1000 * 480
-    x2 = x2 / 1000 * 640
-    y2 = y2 / 1000 * 480
-
-    n_a = math.atan2(y2 - y, x2 - x)
-
-    return n_a
+    angle = float(send_a_request(prompt, image, "find_angle", do_sample=False))
+    return angle
 

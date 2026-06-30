@@ -10,6 +10,7 @@ import camera
 import utils
 import robot
 
+objects = []
 
 def main():
     pred = None
@@ -17,7 +18,8 @@ def main():
     depth_image = depth_scale = intrin = None
 
     try:
-        image, prompt, depth_image, depth_scale, intrin = camera.start_stream()
+        image, depth_image, depth_scale, intrin = camera.start_stream()
+        prompt = input('Get prompt: ')
         if image is not None and prompt is not None:
             pred = utils.send_a_request(prompt, image)
     except Exception as e:

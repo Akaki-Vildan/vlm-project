@@ -2,6 +2,7 @@ import math
 import sys
 import time
 import atexit
+from main import objects
 
 import numpy as np
 import cv2
@@ -68,7 +69,7 @@ robot.set_digital_output_low(1)
 
 
 
-def get_pos_from_cord(coord_camera, image, ang, pixel_center=None, clamp_to_table=False):
+def get_pos_from_cord(image, ang, clamp_to_table=False):
     """
     Преобразует точку из оптического фрейма камеры [X_cam, Y_cam, Z_cam]
     в целевую позицию робота (base), показывает превью и ждёт C/Q.
@@ -94,7 +95,7 @@ def get_pos_from_cord(coord_camera, image, ang, pixel_center=None, clamp_to_tabl
         return None
 
     # 2. cam -> TCP (hand-eye)
-    point_cam_h = np.array([coord_camera[0], coord_camera[1], coord_camera[2], 1.0])
+    point_cam_h = np.array([objects[0].coords_camera["x"], objects[0].coords_camera["y"], objects[0].coords_camera["z"], 1.0])
     point_tcp_xyz = (H_cam_to_tcp @ point_cam_h)[:3]
 
     # 3. TCP -> base.
@@ -118,20 +119,22 @@ def get_pos_from_cord(coord_camera, image, ang, pixel_center=None, clamp_to_tabl
     target_pos_base_1 = [point_base_xyz[0], point_base_xyz[1], target_z - 0.02]
 
     # ================= ВЫЧИСЛЕНИЕ УГЛА =================
-    if ang > 0:
-        ang += math.pi / 2
+    if objects[0].angle > 0:
+        objects[0].angle += math.pi / 2
     else:
-        ang -= math.pi / 2
+        objects[0].angle -= math.pi / 2
 
     # target_yaw_rad = ((ang + math.pi) % (2 * math.pi))
-    target_yaw_rad = ang 
+    target_yaw_rad = objects[0].angle 
     target_yaw_deg = math.degrees(target_yaw_rad)
 
     print(f"[ROBOT] Target Yaw from camera (rad): {target_yaw_rad:.4f}, (deg): {target_yaw_deg:.2f}")
 
     output_rot = [roll, pitch, target_yaw_rad]
 
-
+    pixel_center = []
+    pixel_center[0] = objects[0].coords_image["x"]
+    pixel_center[1] = objects[0].coords_image["y"]
 
     # 5. Визуализация и подтверждение
     if image is not None:
