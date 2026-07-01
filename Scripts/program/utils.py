@@ -112,12 +112,76 @@ def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
 
 
 
-def get_an_angle():
-    prompt = f"Get an agle, of the {objects[0].name}"
-    image, depth_image, depth_scale, intrin = camera.start_stream()
-
+def create_angle_reference_image(image, px, py, radius=100):
+    """
+    Создаёт изображение с кругом, линиями и углами для VLM
     
+    Args:
+        image: исходное изображение с камеры
+        px, py: координаты центра объекта
+        radius: радиус круга
+    
+    Returns:
+        image: изображение с визуализацией углов
+    """
+    img = image.copy()
+    height, width = img.shape[:2]
+    
+    # 1. Рисуем круг (еле заметный)
+    overlay = img.copy()
+    cv2.circle(overlay, (px, py), radius, (255, 255, 255), 2)
+    cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
+    
+    # 2. Рисуем линии от края до края
+    overlay_lines = img.copy()
+    cv2.line(overlay_lines, (0, py), (width, py), (200, 200, 200), 1)
+    cv2.line(overlay_lines, (px, 0), (px, height), (200, 200, 200), 1)
+    cv2.addWeighted(overlay_lines, 0.3, img, 0.7, 0, img)
+    
+    # 3. Добавляем углы в радианах
+    angles = [0, math.pi/4, math.pi/2, 3*math.pi/4, math.pi, 
+              5*math.pi/4, 3*math.pi/2, 7*math.pi/4]
+    
+    angle_labels = ["0", "π/4", "π/2", "3π/4", "π", 
+                    "5π/4", "3π/2", "7π/4"]
+    
+    for angle, label in zip(angles, angle_labels):
+        # Точка на круге
+        x = int(px + radius * math.cos(angle))
+        y = int(py - radius * math.sin(angle))
+        
+        # Рисуем точку
+        cv2.circle(img, (x, y), 3, (100, 100, 100), -1)
+        
+        # Текст с отступом
+        text_x = int(px + (radius + 20) * math.cos(angle))
+        text_y = int(py - (radius + 20) * math.sin(angle))
+        
+        cv2.putText(img, label, (text_x, text_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+    
+    return img
 
-    angle = float(send_a_request(prompt, image, "find_angle", do_sample=False))
+
+def get_an_angle():
+    """
+    Получает угол поворота объекта от VLM
+    
+    Returns:
+        angle: угол в радианах
+    """
+    prompt = f"Get an angle of the {objects[0].name}"
+    image, depth_image, depth_scale, intrin = camera.start_stream()
+    
+    # Получаем координаты центра объекта
+    px = int(objects[0].coords_image["x"])
+    py = int(objects[0].coords_image["y"])
+    
+    # Создаём изображение с визуализацией углов для VLM
+    image_with_angles = create_angle_reference_image(image, px, py)
+    
+    # Отправляем изображение с визуализацией в VLM
+    angle = float(send_a_request(prompt, image_with_angles, "find_angle", do_sample=False))
+    
     return angle
 

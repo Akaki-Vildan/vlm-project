@@ -60,7 +60,10 @@ class UnifiedInference:
             text = f"Please provide the bounding box coordinate of the region this sentence describes: {text}."
         elif task == "positioning":
             print("Pointing task detected. Adding pointing prompt.")
-            text = f"{text}. Please provide its 3D coordinates. Your answer should be formatted as a list of tuples, i.e., [(x1, y1, d1, a1), (x2, y2, d2, a2), ...], where each tuple contains the x and y coordinates, the depth of the point and the rotation angle of the object in radians. Rotation angle it's an angle on wich is need to rotate a camera, regarding start position. Gripper stay in 0 rad. Rotate it to correct angle for pick. Where 0 is y-asix. On image drawn a circuit with agles, use it how u want"
+            text = "".join(text, 'Please provide its 3D coordinates. Your answer should be formatted as a key-value list i.e. {"x": x coordinate, "y": y coordinate, "name": name of the object}, where x anf y are a coordinates of the objects pickup point, name is a name of the object, which u will understand, if i will send it to u again')
+        elif task == "find_angle":
+            print("Angle finding task detected. Adding angle finding prompt.")
+            text = "".join(text, 'Please provide its 3D coordinates. Your answer should be formatted as a key-value list i.e. {"x": x coordinate, "y": y coordinate, "name": name of the object}, where x anf y are a coordinates of the objects pickup point, name is a name of the object, which u will understand, if i will send it to u again')
 
         
 
