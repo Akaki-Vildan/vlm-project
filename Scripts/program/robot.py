@@ -2,7 +2,7 @@ import math
 import sys
 import time
 import atexit
-from main import objects
+from state import objects
 
 import numpy as np
 import cv2
@@ -132,10 +132,7 @@ def get_pos_from_cord(image, clamp_to_table=False):
 
     output_rot = [roll, pitch, target_yaw_rad]
 
-    pixel_center = []
-    pixel_center[0] = objects[0].coords_image["x"]
-    pixel_center[1] = objects[0].coords_image["y"]
-
+    pixel_center = [objects[0].coords_image["x"], objects[0].coords_image["y"]]
     # 5. Визуализация и подтверждение
     if image is not None:
         disp = image.copy()

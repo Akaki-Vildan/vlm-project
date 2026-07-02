@@ -6,11 +6,11 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
+from state import objects
 import camera
 import utils
 import robot
 
-objects = []
 
 def main():
     pred = None
@@ -21,7 +21,7 @@ def main():
         image, depth_image, depth_scale, intrin = camera.start_stream()
         prompt = input('Get prompt: ')
         if image is not None and prompt is not None:
-            pred = utils.send_a_request(prompt, image)
+            pred = utils.send_a_request(prompt, image, task="positioning")
     except Exception as e:
         print(f"[MAIN] Error during stream/request: {e}")
         import traceback

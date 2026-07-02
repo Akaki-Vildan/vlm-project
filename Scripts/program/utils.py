@@ -2,11 +2,12 @@ import os
 import re
 import tempfile
 import math
-from main import objects
+from state import objects
 
 import numpy as np
 import cv2
 import json
+
 
 from inference import UnifiedInference
 import camera
@@ -54,14 +55,14 @@ class object:
         self.coords_robot = coords_robot
         self.angle = angle
 
-
-        self.coords_image["x"] = int(round(self.coords_vlm["x"] / camera.VLM_SPACE * camera.CAMERA_WIDTH))
-        self.coords_image["y"] = int(round(self.coords_vlm["y"] / camera.VLM_SPACE * camera.CAMERA_HEIGHT))
-
-
+        def a():
+            self.coords_image["x"] = int(round(self.coords_vlm["x"] / camera.VLM_SPACE * camera.CAMERA_WIDTH))
+            self.coords_image["y"] = int(round(self.coords_vlm["y"] / camera.VLM_SPACE * camera.CAMERA_HEIGHT))
 
 
-def send_a_request(prompt_text, image_data, task, do_sample=True, temperature=0.7):
+
+
+def send_a_request(prompt_text, image_data, task, do_sample=False, temperature=1):
     '''
     tasks: "general", "pointing", "trajectory", "grounding", "positioning"
     '''
@@ -92,18 +93,22 @@ def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
     Парсит пиксельные координаты из ответа VLM, депроецирует в 3D
     и переводит в позицию робота.
     """
-    data = json.loads(pred)
+    data = get_json_from_text(pred)
     new_obj.coords_vlm["x"] = int(data["x"])
     new_obj.coords_vlm["y"] = int(data["y"])
+    new_obj.a()
 
     ang = get_an_angle()
 
     print(f"[UTILS] Angle which gets from fuction: {ang}")
 
-    data = json.loads(ang)
+    data = get_json_from_text(pred)
     new_obj.angle = data["a"]
 
-    print(f"[UTILS] VLM pixel: x={new_obj.coords_vlm["x"]}, y={new_obj.coords_vlm["y"]}, angle={new_obj.angle}")
+    x = new_obj.coords_vlm["x"]
+    y = new_obj.coords_vlm["y"]
+
+    print(f"[UTILS] VLM pixel: x={x}, y={y}, angle={new_obj.angle}")
 
     objects.append(new_obj)
 
@@ -112,8 +117,8 @@ def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
     if objects[0].coords_camera is None:
         return None
 
-
-    print(f"[UTILS] Camera 3D coords: {objects[0].coords_camera}")
+    coords = objects[0].coords_camera
+    print(f"[UTILS] Camera 3D coords: {coords}")
     return robot.get_pos_from_cord(img)
 
 
@@ -191,3 +196,20 @@ def get_an_angle():
     
     return angle
 
+def get_json_from_text(pred):
+
+    text = list(pred[0])[0].strip()
+     
+    s = 0
+
+    e = 0
+
+    for i in range(len(text)):
+        if text[i] == "{" and text[i+1] == '"':
+            s = i
+        if text[i] == "}" and text[i-1] == '"':
+            e = i + 1
+            res_p = text[s:e]
+            res = json.loads(str(res_p))
+            return res
+    return 

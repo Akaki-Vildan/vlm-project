@@ -1,7 +1,7 @@
 import pyrealsense2 as rs
 import numpy as np
 import cv2
-from main import objects
+from state import objects
 
 # Camera settings
 CAMERA_WIDTH = 640
@@ -90,7 +90,9 @@ def pixel_to_camera_3d(depth_image, depth_scale, intrin, color_image):
         return None
     depth = float(np.median(valid))
 
-    print(f"[CAMERA] point in 3D: ({objects[0].coords_image["x"]}, {objects[0].coords_image["y"]}, {depth:.4f})")
+    x = objects[0].coords_image["x"]
+    y = objects[0].coords_image["y"]
+    print(f"[CAMERA] point in 3D: ({x}, {y}, {depth:.4f})")
 
     # Депроекция: пиксель + глубина -> 3D точка в оптическом фрейме камеры
     point_3d = rs.rs2_deproject_pixel_to_point(intrin, [objects[0].coords_image["x"], objects[0].coords_image["y"]], depth)

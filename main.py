@@ -5,6 +5,7 @@ import cv2
 import textwrap
 import tempfile
 import os
+import json
 
 # Camera settings
 CAMERA_WIDTH = 640
@@ -25,7 +26,7 @@ model = UnifiedInference(LOCAL_MODEL_PATH)
 def send_a_request(prompt_text, images_data):
     print("[STATUS] Sending request to model... This might take a moment.")
 
-    task = int(input('Which task u want to do: 0-general 1-trajectory 2-pointing 3-grounding 4-positioning: '))
+    task = int(input('Which task u want to do: 0-general 1-trajectory 2-pointing 3-grounding 4-positioning 5-find_angle: '))
     plot_inf = int(input("Are u need a drawing result? 0 - no, 1 - yes: "))
     sample_inf = int(input("Are u want to do sample? 0 - no, 1 - yes: "))
     temperature = float(input("White temperature u want: "))
@@ -41,7 +42,7 @@ def send_a_request(prompt_text, images_data):
         do_sample = False
 
 
-    taks_ar = ['general', 'trajectory', 'pointing', 'grounding', "positioning"]
+    taks_ar = ['general', 'trajectory', 'pointing', 'grounding', "positioning", "find_angle"]
     
     temp_file_path = None
     
@@ -75,6 +76,9 @@ def send_a_request(prompt_text, images_data):
         image_to_send = "Scripts/captured_photos/new image_1.png"
         pred, image = model.inference(prompt_text, image_to_send, task=taks_ar[task], plot=plot, do_sample=do_sample, temperature=temperature)
         print(f"\n=== Prediction ===\n{pred}\n==================\n")
+        if(task != 0):
+            pred_n = get_json_from_text(pred)
+            print(pred_n)
     finally:
         # 4. CLEAN UP
         if temp_file_path is not None and os.path.exists(temp_file_path):
@@ -123,6 +127,26 @@ def start_stream(pipeline):
         elif key == ord('q'):
             print("Cancelled.")
             return None, None, None
+        
+
+def get_json_from_text(pred):
+
+    text = list(pred)[0].strip()
+     
+    s = 0
+
+    e = 0
+
+    for i in range(len(text)):
+        if text[i] == "{" and text[i+1] == '"':
+            s = i
+        if text[i] == "}" and text[i-1] == '"':
+            e = i + 1
+            res_p = text[s:e]
+            res = json.loads(str(res_p))
+            return res
+    return 
+
 
 
 def main():
