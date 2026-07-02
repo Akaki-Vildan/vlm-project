@@ -1,47 +1,80 @@
 import sys
 import os
+import cv2
 
-# Путь к родительской директории (папка Scripts)
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-import camera
-import utils
-import robot
-
+from utils import DetectedObject, Point2D
+from camera import RealSenseCamera
+from robot import RobotController
+from vlm import VLMProcessor
 
 def main():
-    pred = None
-    image = None
-    depth_image = depth_scale = intrin = None
+    # 1. Initialize Systems (Hardware doesn't turn on until we call .start() or .connect())
+    cam = RealSenseCamera()
+    vlm = VLMProcessor()
+    robot = RobotController()
 
     try:
-        image, prompt, depth_image, depth_scale, intrin = camera.start_stream()
-        if image is not None and prompt is not None:
-            pred = utils.send_a_request(prompt, image)
+        cam.start()
+        robot.connect()
     except Exception as e:
-        print(f"[MAIN] Error during stream/request: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Failed to initialize hardware: {e}")
+        return
 
-    if pred is not None:
-        print(f"[MAIN] pred: {pred}")
-        
-        robot_position = utils.get_coords_for_robot(
-            pred, 
-            image, 
-            depth_image, 
-            depth_scale, 
-            intrin)
-        
-        if robot_position is not None:
-            print(f"Final point: {robot_position}")
-            robot.move_robot_to_pos(robot_position)
-            
-    else:
-        print("[MAIN] No prediction available, skipping robot command.")
+    # 2. Capture Frame
+    image, depth_image, intrin = cam.capture_frame()
+    if image is None:
+        print("No image captured.")
+        return
 
+    prompt = input('Get prompt: ')
+    if not prompt:
+        return
+
+    # 3. Get VLM Coordinates
+    pred = vlm.send_request(prompt, image, "pointing")
+    if not pred:
+        print("[MAIN] No prediction.")
+        return
+
+    data = vlm.get_json_from_text(pred)
+    if not data:
+        print("[MAIN] Failed to parse JSON.")
+        return
+
+    # 4. Create Object & Calculate Image Coords
+    target = DetectedObject(
+        name="target_object", 
+        vlm_point=Point2D(x=int(data["x"]), y=int(data["y"])),
+        angle=data.get("a", 0.0)
+    )
+    target.convert_vlm_to_image(cam.width, cam.height)
+
+    # 5. Get Angle (Requires a second camera capture in your logic)
+    target.angle = vlm.get_object_angle(target, cam)
+    if target.angle is None:
+        return
+
+    # 6. Calculate Camera 3D Coords
+    target.camera_point = cam.deproject_pixel(
+        target.image_point.x, 
+        target.image_point.y, 
+        depth_image, 
+        intrin
+    )
+    if target.camera_point is None:
+        print("[MAIN] Failed to deproject 3D point.")
+        return
+
+    # 7. Calculate Robot Position & Move
+    print(f"[MAIN] Camera 3D coords: ({target.camera_point.x:.3f}, {target.camera_point.y:.3f}, {target.camera_point.z:.3f})")
+    
+    move_targets = robot.get_target_positions(target, image)
+    if move_targets:
+        robot.execute_move(move_targets)
 
 if __name__ == "__main__":
     main()
