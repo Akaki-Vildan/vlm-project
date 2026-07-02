@@ -6,6 +6,7 @@ from main import objects
 
 import numpy as np
 import cv2
+import json
 
 from inference import UnifiedInference
 import camera
@@ -91,13 +92,18 @@ def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
     Парсит пиксельные координаты из ответа VLM, депроецирует в 3D
     и переводит в позицию робота.
     """
-    nums = [float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", str(pred))]
-    if len(nums) < 2:
-        print(f"[UTILS] Could not parse pixel coords from pred: {pred}")
-        return None
+    data = json.loads(pred)
+    new_obj.coords_vlm["x"] = int(data["x"])
+    new_obj.coords_vlm["y"] = int(data["y"])
 
-    new_obj.coords_vlm["x"], new_obj.coords_vlm["y"], ang = nums[0], nums[1], nums[3]
-    print(f"[UTILS] VLM pixel: x={new_obj.coords_vlm["x"]}, y={new_obj.coords_vlm["y"]}, angle={ang}")
+    ang = get_an_angle()
+
+    print(f"[UTILS] Angle which gets from fuction: {ang}")
+
+    data = json.loads(ang)
+    new_obj.angle = data["a"]
+
+    print(f"[UTILS] VLM pixel: x={new_obj.coords_vlm["x"]}, y={new_obj.coords_vlm["y"]}, angle={new_obj.angle}")
 
     objects.append(new_obj)
 
@@ -108,7 +114,7 @@ def get_coords_for_robot(pred, img, depth_image, depth_scale, intrin):
 
 
     print(f"[UTILS] Camera 3D coords: {objects[0].coords_camera}")
-    return robot.get_pos_from_cord(img, ang)
+    return robot.get_pos_from_cord(img)
 
 
 

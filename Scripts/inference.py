@@ -60,10 +60,10 @@ class UnifiedInference:
             text = f"Please provide the bounding box coordinate of the region this sentence describes: {text}."
         elif task == "positioning":
             print("Pointing task detected. Adding pointing prompt.")
-            text = "".join(text, 'Please provide its 3D coordinates. Your answer should be formatted as a key-value list i.e. {"x": x coordinate, "y": y coordinate, "name": name of the object}, where x anf y are a coordinates of the objects pickup point, name is a name of the object, which u will understand, if i will send it to u again')
+            text = "".join(text, 'Please provide its 3D coordinates. Your answer should be formatted as a key-value list i.e. {"x": x coordinate, "y": y coordinate, "z": z coodrinate, "name": name of the object}, where x anf y are a coordinates of the objects pickup point ,z - is a depth in this point, name is a name of the object, which u will understand, if i will send it to u again')
         elif task == "find_angle":
             print("Angle finding task detected. Adding angle finding prompt.")
-            text = "".join(text, 'Please provide its 3D coordinates. Your answer should be formatted as a key-value list i.e. {"x": x coordinate, "y": y coordinate, "name": name of the object}, where x anf y are a coordinates of the objects pickup point, name is a name of the object, which u will understand, if i will send it to u again')
+            text = "".join(text, 'Determine the angle of rotation of the object relative to the x-axis. The figure shows a circle with angles marked on it, and the center of the circle is at the point of elevation of the object. You need to determine the angle at which the object is tilted. This is necessary to rotate the gripper to the desired angle. Initially, the gripper is at an angle of 0 radians. Give me the minimum angle that the gripper needs to turn. For example, if we have an object at an angle greater than 0, we need to rotate it so that it is perpendicular to the x-axis, i.e., at an angle of 0. The answer should be in the form of: {"a": rotation angle, "name": name of the object} where a is the rotation angle,  name is a name of the object, which u will understand, if i will send it to u again.')
 
         
 

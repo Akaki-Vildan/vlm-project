@@ -69,7 +69,7 @@ robot.set_digital_output_low(1)
 
 
 
-def get_pos_from_cord(image, ang, clamp_to_table=False):
+def get_pos_from_cord(image, clamp_to_table=False):
     """
     Преобразует точку из оптического фрейма камеры [X_cam, Y_cam, Z_cam]
     в целевую позицию робота (base), показывает превью и ждёт C/Q.
