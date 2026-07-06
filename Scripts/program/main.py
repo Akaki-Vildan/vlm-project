@@ -12,7 +12,7 @@ from robot import RobotController
 from vlm import VLMProcessor
 
 def main():
-    # 1. Initialize Systems (Hardware doesn't turn on until we call .start() or .connect())
+    # # 1. Initialize Systems (Hardware doesn't turn on until we call .start() or .connect())
     cam = RealSenseCamera()
     vlm = VLMProcessor()
     robot = RobotController()
@@ -40,23 +40,34 @@ def main():
         print("[MAIN] No prediction.")
         return
 
-    data = vlm.get_json_from_text(pred)
-    if not data:
-        print("[MAIN] Failed to parse JSON.")
-        return
+    data = vlm.safe_parse(pred)
+    coords = data[0]
+    print(f"coords {coords}")
+
+    # data = vlm.get_coordinates(pred)
+    # if not data:
+    #     print("[MAIN] Failed to parse JSON.")
+    #     return
+    
 
     # 4. Create Object & Calculate Image Coords
     target = DetectedObject(
-        name="target_object", 
-        vlm_point=Point2D(x=int(data["x"]), y=int(data["y"])),
-        angle=data.get("a", 0.0)
+        name=data[-1], 
+        vlm_point=Point2D(x=int(coords[0]), y=int(coords[1])),
+        angle=0
     )
     target.convert_vlm_to_image(cam.width, cam.height)
 
     # 5. Get Angle (Requires a second camera capture in your logic)
-    target.angle = vlm.get_object_angle(target, cam)
+    angle = vlm.get_object_angle(target, cam)
     if target.angle is None:
         return
+
+    print(f"ahgle = {angle}")
+
+    angle_data = vlm.safe_parse(angle)
+    print(angle_data)
+    target.angle = angle_data[0][0]
 
     # 6. Calculate Camera 3D Coords
     target.camera_point = cam.deproject_pixel(
@@ -73,6 +84,7 @@ def main():
     print(f"[MAIN] Camera 3D coords: ({target.camera_point.x:.3f}, {target.camera_point.y:.3f}, {target.camera_point.z:.3f})")
     
     move_targets = robot.get_target_positions(target, image)
+    print(move_targets)
     if move_targets:
         robot.execute_move(move_targets)
 

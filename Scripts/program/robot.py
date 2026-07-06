@@ -74,13 +74,15 @@ class RobotController:
         target_z = point_base_xyz[2] + TARGET_OFFSET_Z
         target_pos_base = [point_base_xyz[0], point_base_xyz[1], target_z]
         target_pos_base_5 = [point_base_xyz[0], point_base_xyz[1], target_z + 0.05]
-        target_pos_base_1 = [point_base_xyz[0], point_base_xyz[1], target_z - 0.02]
+        target_pos_base_1 = [point_base_xyz[0], point_base_xyz[1], target_z + 0.02]
 
         # 4. Angle calculation
         if target_obj.angle > 0:
-            target_yaw_rad = target_obj.angle + math.pi / 2
-        else:
             target_yaw_rad = target_obj.angle - math.pi / 2
+        else:
+            target_yaw_rad = target_obj.angle + math.pi / 2
+
+        
             
         output_rot = [roll, pitch, target_yaw_rad]
 
@@ -133,3 +135,8 @@ class RobotController:
         time.sleep(0.5)
         self.go_home()
         self.robot.set_digital_output_low(1)
+
+    def toggle_free_drive(self):
+        self.robot.zg_on()
+        while True:
+            continue

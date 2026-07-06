@@ -4,6 +4,70 @@ from qwen_vl_utils import process_vision_info
 from transformers import AutoModelForImageTextToText, AutoProcessor
 import math
 
+
+prompt_pointing = """OUTPUT RULES (STRICTLY ENFORCED):
+1. Output ONLY a valid Python list containing tuples and the object name.
+2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
+3. Format: [((x1, y1, d1), (x2, y2, d2), ...), "object_name"]
+4. x, y are coordinates (0~1000), d is depth."""
+
+prompt_trajectory = """OUTPUT RULES (STRICTLY ENFORCED):
+1. Output ONLY a valid Python list containing a list of waypoints and the object name.
+2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
+3. Format: [[(x1, y1, d1), (x2, y2, d2), ...], "object_name"]
+4. x, y are coordinates (0~1000), d is depth."""
+
+prompt_grounding = """OUTPUT RULES (STRICTLY ENFORCED):
+1. Output ONLY a valid Python list containing the bounding box and the object name.
+2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
+3. Format: [[[x1, y1, x2, y2]], "object_name"]
+4. x1, y1 are top-left coords, x2, y2 are bottom-right coords (0~1000)."""
+
+prompt_positioning = """OUTPUT RULES (STRICTLY ENFORCED):
+1. Output ONLY a valid Python list containing tuples and the object name.
+2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
+3. Format: [((x1, y1, d1, a1), (x2, y2, d2, a2), ...), "object_name"]
+4. x, y are coordinates (0~1000), d is depth, a is the rotation angle in radians.
+5. Angle 'a' is the camera rotation needed to pick the object (0 is y-axis)."""
+
+prompt_find_angle = """You are a spatial analysis AI. Determine the rotation angle of the target object using the visual protractor on the image.
+
+VISUAL LAYOUT ON IMAGE:
+- RED DOT: Center of the object.
+- WHITE LINES: A protractor showing 8 directions with text labels.
+
+AXIS MAPPING (CRUCIAL - THIS IS NON-STANDARD):
+- The line pointing exactly DOWN is 0.0
+- The line pointing exactly RIGHT is 1.5708 (pi/2)
+- The line pointing exactly UP is 3.1416 (pi or -pi)
+- The line pointing exactly LEFT is -1.5708 (-pi/2)
+
+ANGLE SIGN RULES (Range: -3.1416 to 3.1416):
+- RIGHT HALF (Down to Up going through Right): Angles are POSITIVE (0.0 to 3.14).
+- LEFT HALF (Down to Up going through Left): Angles are NEGATIVE (0.0 to -3.14).
+
+ANALYSIS ALGORITHM:
+1. Find the RED DOT.
+2. Identify the main axis/forward direction of the target object.
+3. Mentally project this axis to the white protractor lines.
+4. Determine the exact angle based on the AXIS MAPPING and SIGN RULES above.
+
+OUTPUT RULES (STRICTLY ENFORCED):
+1. Output ONLY a valid Python list.
+2. NO markdown formatting, NO text explanations.
+3. The angle MUST be a float number (e.g., 1.57, -1.57, 3.14). DO NOT output strings like "pi".
+4. Format: [[angle, "object_name"]]
+
+OUTPUT EXAMPLES:
+Object points straight DOWN: [[0.0, "marker"]]
+Object points straight RIGHT: [[1.5708, "blue marker"]]
+Object points straight UP: [[3.1416, "cup"]]
+Object points straight LEFT: [[-1.5708, "blue marker"]]
+Object points diagonally down-left: [[-0.7854, "pen"]]
+"""
+
+
+
 class UnifiedInference:
     """
     A unified class for performing inference using RoboBrain 2.5 models.
@@ -44,25 +108,26 @@ class UnifiedInference:
         if isinstance(image, str):
             image = [image]
 
-        assert task in ["general", "pointing", "trajectory", "grounding", "positioning"], \
+        assert task in ["general", "pointing", "trajectory", "grounding", "positioning", "find_angle"], \
             f"Invalid task type: {task}. Supported tasks are 'general', 'pointing', 'trajectory', 'grounding', 'positioning'."
-        assert task == "general" or (task in ["pointing", "trajectory", "grounding", "positioning"] and len(image) == 1), \
+        assert task == "general" or (task in ["pointing", "trajectory", "grounding", "positioning", "find_angle"] and len(image) == 1), \
             "Pointing, grounding, and trajectory tasks require exactly one image."
 
         if task == "pointing":
             print("Pointing task detected. Adding pointing prompt.")
-            text = f"{text}. Please provide its 3D coordinates. Your answer should be formatted as a list of tuples, i.e., [(x1, y1, d1), (x2, y2, d2), ...], where each tuple contains the x and y coordinates and the depth of the point."
+            text = f"{text}\n\n{prompt_pointing}"
         elif task == "trajectory":
             print("Trajectory task detected. Adding trajectory prompt.")
-            text = f"Please predict 3D end-effector-centric waypoints to complete the task successfully. The task is \"{text}\". Your answer should be formatted as a list of tuples, i.e., [(x1, y1, d1), (x2, y2, d2), ...], where each tuple contains the x and y coordinates and the depth of the point."
+            text = f"Task: \"{text}\"\n\n{prompt_trajectory}"
         elif task == "grounding":
             print("Grounding task detected. Adding grounding prompt.")
-            text = f"Please provide the bounding box coordinate of the region this sentence describes: {text}."
+            text = f"Target region: \"{text}\"\n\n{prompt_grounding}"
         elif task == "positioning":
-            print("Pointing task detected. Adding pointing prompt.")
-            text = f"{text}. Please provide its 3D coordinates. Your answer should be formatted as a list of tuples, i.e., [(x1, y1, d1, a1), (x2, y2, d2, a2), ...], where each tuple contains the x and y coordinates, the depth of the point and the rotation angle of the object in radians. Rotation angle it's an angle on wich is need to rotate a camera, regarding start position. Gripper stay in 0 rad. Rotate it to correct angle for pick. Where 0 is y-asix"
-
-        
+            print("Positioning task detected. Adding positioning prompt.")
+            text = f"{text}\n\n{prompt_positioning}"
+        elif task == "find_angle":
+            print("Angle finding task detected. Adding angle finding prompt.")
+            text = f"{text}\n\n{prompt_find_angle}"
 
         print(f"\n{'='*20} INPUT {'='*20}\n{text}\n{'='*47}\n")
 
@@ -156,9 +221,8 @@ class UnifiedInference:
 
 
         # Return unified format
-        result = {answer_text}
         print("[INFERENSE] end of the function")
-        return result, img
+        return answer_text
 
     def draw_on_image(self, image_path, points=None, boxes=None, trajectories=None, positionings=None, output_path=None):
         print("[DRAW_IMAGE] this fucntion works")
@@ -271,42 +335,3 @@ class UnifiedInference:
             return None
 
 
-# Usage examples
-if __name__ == "__main__":
-    print("=== Testing RoboBrain2.5-8B-NV Model ===")
-    model_8b = UnifiedInference("BAAI/RoboBrain2.5-8B-NV")
-    # Case 1
-    prompt = "What is shown in this image?"
-    image = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    pred_8b = model_8b.inference(prompt, image, task="general")
-    print(f"Prediction:\n{pred_8b}")
-    # Case 2
-    prompt = "the person wearing a red hat"
-    image = "./assets/demo/grounding.jpg"
-    pred_8b = model_8b.inference(prompt, image, task="grounding", plot=True, do_sample=False)
-    print(f"Prediction:\n{pred_8b}")
-    # Case 3
-    prompt = "the affordance area for holding the cup"
-    image = "./assets/demo/affordance.jpg"
-    pred_8b = model_8b.inference(prompt, image, task="pointing", plot=True, do_sample=False)
-    print(f"Prediction:\n{pred_8b}")
-    # Case 4
-    prompt = "reach for the banana on the plate"
-    image = "./assets/demo/trajectory.jpg"
-    pred_8b = model_8b.inference(prompt, image, task="trajectory", plot=True, do_sample=False)
-    print(f"Prediction:\n{pred_8b}")
-    # Case 5
-    prompt = "Identify spot within the vacant space that's between the two mugs"
-    image = "./assets/demo/pointing.jpg"
-    pred_8b = model_8b.inference(prompt, image, task="pointing", plot=True, do_sample=False)
-    print(f"Prediction:\n{pred_8b}")
-    # Case 6
-    prompt = "Identify spot within toilet in the house"
-    image = "./assets/demo/navigation1.jpg"
-    pred_8b = model_8b.inference(prompt, image, task="pointing", plot=True, do_sample=False)
-    print(f"Prediction:\n{pred_8b}")
-    # Case 7
-    prompt = "Identify spot within sofa in the house"
-    image = "./assets/demo/navigation2.jpg"
-    pred_8b = model_8b.inference(prompt, image, task="pointing", plot=True, do_sample=False)
-    print(f"Prediction:\n{pred_8b}")
