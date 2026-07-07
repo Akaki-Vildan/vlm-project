@@ -12,10 +12,11 @@ class Point3D:
     z: float = 0.0
 
 class DetectedObject:
-    def __init__(self, name: str, vlm_point: Point2D, angle: float):
+    def __init__(self, name: str, vlm_point: Point2D, angle: float, img=None):
         self.name = name
         self.vlm_point = vlm_point
         self.angle = angle
+        self.image = img
         
         self.image_point = Point2D()
         self.camera_point = Point3D()

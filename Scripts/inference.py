@@ -5,11 +5,35 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 import math
 
 
-prompt_pointing = """OUTPUT RULES (STRICTLY ENFORCED):
+prompt_pointing = """You are a precision spatial targeting AI. Your task is to analyze the operator's command, identify the exact interaction point on the target object in the image, and provide its coordinates.
+
+TASK BREAKDOWN:
+1. UNDERSTAND THE COMMAND: Read what the operator wants to do (e.g., "grasp the handle", "touch the top-left corner", "press the center").
+2. LOCATE THE POINT: Find the exact pixel location on the image that corresponds to the action described in the command.
+3. ESTIMATE DEPTH: Provide a rough estimate of the distance to that specific point in meters (e.g., 0.5 for half a meter).
+
+COORDINATE SYSTEM RULES (CRITICAL):
+You MUST output coordinates in a relative scale from 0 to 1000. Do NOT output raw pixels.
+- X-axis: 0 is the absolute LEFT edge of the image, 1000 is the absolute RIGHT edge. (The center is ~500).
+- Y-axis: 0 is the absolute TOP edge of the image, 1000 is the absolute BOTTOM edge. (The center is ~500).
+- Depth (d): The distance to the object in meters (e.g., 0.3, 0.85).
+
+OUTPUT RULES (STRICTLY ENFORCED):
 1. Output ONLY a valid Python list containing tuples and the object name.
 2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
 3. Format: [((x1, y1, d1), (x2, y2, d2), ...), "object_name"]
-4. x, y are coordinates (0~1000), d is depth."""
+4. x, y MUST be integers between 0 and 1000. d MUST be a float.
+
+EXAMPLES:
+Command: "Get ready to pick up the blue cup by its handle"
+Answer: [((620, 450, 0.5),), "blue cup"]
+
+Command: "Point to the top-left corner of the red box"
+Answer: [((300, 200, 0.8),), "red box"]
+
+Command: "Show me both wheels of the robot"
+Answer: [((250, 700, 0.6), (750, 700, 0.6)), "robot"]
+"""
 
 prompt_trajectory = """OUTPUT RULES (STRICTLY ENFORCED):
 1. Output ONLY a valid Python list containing a list of waypoints and the object name.
@@ -23,47 +47,73 @@ prompt_grounding = """OUTPUT RULES (STRICTLY ENFORCED):
 3. Format: [[[x1, y1, x2, y2]], "object_name"]
 4. x1, y1 are top-left coords, x2, y2 are bottom-right coords (0~1000)."""
 
-prompt_positioning = """OUTPUT RULES (STRICTLY ENFORCED):
-1. Output ONLY a valid Python list containing tuples and the object name.
-2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
-3. Format: [((x1, y1, d1, a1), (x2, y2, d2, a2), ...), "object_name"]
-4. x, y are coordinates (0~1000), d is depth, a is the rotation angle in radians.
-5. Angle 'a' is the camera rotation needed to pick the object (0 is y-axis)."""
+prompt_positioning = """You are a precision spatial analysis AI. Your task is to locate the target object in the image and extract exactly 5 key structural points around it, plus its name.
 
-prompt_find_angle = """You are a spatial analysis AI. Determine the rotation angle of the target object using the visual protractor on the image.
+POINT MAPPING RULES (STRICT ORDER):
+You MUST output exactly 5 points in this specific order:
+- Point 0: The exact GEOMETRIC CENTER of the object.
+- Point 1: The TOP-LEFT corner of the object's bounding area.
+- Point 2: The TOP-RIGHT corner of the object's bounding area.
+- Point 3: The BOTTOM-RIGHT corner of the object's bounding area.
+- Point 4: The BOTTOM-LEFT corner of the object's bounding area.
 
-VISUAL LAYOUT ON IMAGE:
-- RED DOT: Center of the object.
-- WHITE LINES: A protractor showing 8 directions with text labels.
+COORDINATE SYSTEM RULES (CRITICAL):
+- X-axis: 0 is the absolute LEFT edge of the image, 1000 is the absolute RIGHT edge.
+- Y-axis: 0 is the absolute TOP edge of the image, 1000 is the absolute BOTTOM edge.
+- Depth (d): The approximate distance to the object in meters (e.g., 0.5).
+- x, y MUST be integers between 0 and 1000. d MUST be a float.
+- name MUST be string and without it program can't work
 
-AXIS MAPPING (CRUCIAL - THIS IS NON-STANDARD):
-- The line pointing exactly DOWN is 0.0
-- The line pointing exactly RIGHT is 1.5708 (pi/2)
-- The line pointing exactly UP is 3.1416 (pi or -pi)
-- The line pointing exactly LEFT is -1.5708 (-pi/2)
+OUTPUT RULES (STRICTLY ENFORCED):
+1. Output ONLY a valid Python list.
+2. NO explanations, NO markdown (no ``` blocks), NO quotes around the whole answer.
+3. The structure MUST be a list containing ONE tuple of 5 points, followed by the object name string.
+4. Format: [((x0, y0, d0), (x1, y1, d1), (x2, y2, d2), (x3, y3, d3), (x4, y4, d4)), "object_name"]
 
-ANGLE SIGN RULES (Range: -3.1416 to 3.1416):
-- RIGHT HALF (Down to Up going through Right): Angles are POSITIVE (0.0 to 3.14).
-- LEFT HALF (Down to Up going through Left): Angles are NEGATIVE (0.0 to -3.14).
+EXAMPLE:
+If a red cup is in the center of the image at 0.4 meters depth:
+[((500, 500, 0.4), (400, 300, 0.4), (600, 300, 0.4), (600, 700, 0.4), (400, 700, 0.4)), "red cup"]
+"""
 
-ANALYSIS ALGORITHM:
+prompt_find_angle = """You are a spatial analysis AI. Your task is to measure the angle of a specific edge of the target object using the visual protractor on the image.
+
+VISUAL ELEMENTS:
+- RED DOT: The center.
+- WHITE CIRCLE & LINES: A protractor. The line pointing straight DOWN is labeled "0".
+
+INSTRUCTIONS:
 1. Find the RED DOT.
-2. Identify the main axis/forward direction of the target object.
-3. Mentally project this axis to the white protractor lines.
-4. Determine the exact angle based on the AXIS MAPPING and SIGN RULES above.
+2. IDENTIFY AN EDGE: Look at the target object. Pick ONE clear, straight edge or continuous line on it.
+   - For a square/cube: pick the top edge, a side edge, or a visible diagonal.
+   - For a pen/marker: pick its long body.
+   - For a cup: pick the handle or a vertical side rim.
+3. EXTEND THE EDGE: Mentally extend that chosen edge in a straight line through the RED DOT until it reaches the protractor circle.
+4. READ THE PROTRACTOR: Find the white line (and its text label) that is closest to where your extended edge points.
+5. CALCULATE DEVIATION: The "0" line points DOWN. Calculate the angle of your edge based on its deviation from this "0" line.
+
+MAPPING LABELS TO NUMBERS (Translate the text you see into these exact floats):
+- "0" -> 0.0
+- "pi/4" -> 0.7854
+- "pi/2" -> 1.5708
+- "3pi/4" -> 2.3562
+- "pi" -> 3.1416
+- "-3pi/4" -> -2.3562
+- "-pi/2" -> -1.5708
+- "-pi/4" -> -0.7854
+
+ESTIMATION:
+If the edge points exactly between two labels, average their numbers. (e.g., exactly between "0" and "pi/4" is 0.3927).
 
 OUTPUT RULES (STRICTLY ENFORCED):
 1. Output ONLY a valid Python list.
 2. NO markdown formatting, NO text explanations.
-3. The angle MUST be a float number (e.g., 1.57, -1.57, 3.14). DO NOT output strings like "pi".
+3. The angle MUST be a float number. NEVER output strings like "pi/2".
 4. Format: [[angle, "object_name"]]
 
-OUTPUT EXAMPLES:
-Object points straight DOWN: [[0.0, "marker"]]
-Object points straight RIGHT: [[1.5708, "blue marker"]]
-Object points straight UP: [[3.1416, "cup"]]
-Object points straight LEFT: [[-1.5708, "blue marker"]]
-Object points diagonally down-left: [[-0.7854, "pen"]]
+EXAMPLES:
+The top edge of a cube points exactly at the "pi/2" line: [[1.5708, "cube"]]
+The handle of a cup points exactly at the "-pi/4" line: [[-0.7854, "blue cup"]]
+A pen points exactly halfway between "0" and "pi/4": [[0.3927, "pen"]]
 """
 
 
@@ -121,7 +171,7 @@ class UnifiedInference:
             text = f"Task: \"{text}\"\n\n{prompt_trajectory}"
         elif task == "grounding":
             print("Grounding task detected. Adding grounding prompt.")
-            text = f"Target region: \"{text}\"\n\n{prompt_grounding}"
+            text = f"Please provide the bounding box coordinate of the region this sentence describes: {text}."
         elif task == "positioning":
             print("Positioning task detected. Adding positioning prompt.")
             text = f"{text}\n\n{prompt_positioning}"
@@ -177,7 +227,7 @@ class UnifiedInference:
         if plot and task in ["pointing", "trajectory", "grounding", "positioning"]:
             print("Plotting enabled. Drawing results on the image ...")
             
-            plot_points, plot_boxes, plot_trajectories, positionings = None, None, None, None
+            plot_points, plot_boxes, plot_trajectories, plot_pos = None, None, None, None
             result_text = answer_text  # Use the processed answer text for plotting
             
             if task == "trajectory":
@@ -199,9 +249,9 @@ class UnifiedInference:
                 print(f"Extracted bounding boxes: {plot_boxes}")
                 image_name_to_save = os.path.basename(image[0]).replace(".", "_with_grounding_annotated.")
             elif task == "positioning":
-                point_pattern = r'\(\s*(\d+)\s*,\s*(\d+)\s*,\s*([+-]?\d+\.\d+)\s*,\s*([+-]?\d+)\s*\)'
+                point_pattern = r'\(\s*(\d+)\s*,\s*(\d+)\s*,\s*([+-]?\d+\.\d+)\s*\)'
                 positionings = re.findall(point_pattern, result_text)
-                plot_pos = [(int(x), int(y), float(d), float(a)) for x, y, d, a in positionings]
+                plot_pos = [(int(x), int(y), float(d)) for x, y, d in positionings]
                 print(f"Extracted positionings: {plot_pos}")
                 image_name_to_save = os.path.basename(image[0]).replace(".", "_with_positioning_annotated.")
 
@@ -218,11 +268,11 @@ class UnifiedInference:
                 output_path=image_path_to_save
             )
             print("[DRAW] try to start draw_on_image")
-
+            return answer_text, img
 
         # Return unified format
         print("[INFERENSE] end of the function")
-        return answer_text
+        return answer_text, None
 
     def draw_on_image(self, image_path, points=None, boxes=None, trajectories=None, positionings=None, output_path=None):
         print("[DRAW_IMAGE] this fucntion works")
@@ -294,29 +344,11 @@ class UnifiedInference:
                     cv2.circle(image, (end_x, end_y), 7, (255, 0, 0), -1)  # Blue end point
                     
             if positionings:
-                for pos in positionings:
-                    x_rel, y_rel, depth, angle = pos
+                for point in positionings:
+                    x_rel, y_rel = point
                     x, y = rel_to_abs(x_rel, y_rel)
-                    
-                    # 1. Рисуем саму точку
                     cv2.circle(image, (x, y), 5, (0, 0, 255), -1)  # Red solid circle
 
-                    # 2. Рисуем направленную прямую (стрелку) под углом
-                    length = 100  # Длина стрелки в пикселях
-                    rad = math.radians(angle)
-                    
-                    # Вычисляем конечную точку стрелки
-                    # Стандартная математическая система: 0 градусов смотрит вправо, против часовой стрелки
-                    x_end = int(x + length * math.cos(rad))
-                    y_end = int(y - length * math.sin(rad)) # Вычитаем, так как в изображениях ось Y направлена вниз
-                    
-                    # ЕСЛИ в вашей системе координат 0 градусов смотрит "вверх" и отсчет по часовой стрелке, 
-                    # используйте вместо этого:
-                    # x_end = int(x + length * math.sin(rad))
-                    # y_end = int(y - length * math.cos(rad))
-                    
-                    # Рисуем стрелку (Желтый цвет в BGR: 0, 255, 255)
-                    cv2.arrowedLine(image, (x, y), (x_end, y_end), (0, 255, 255), 2, tipLength=0.2)
 
             # Determine output path
             if not output_path:

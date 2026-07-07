@@ -78,5 +78,21 @@ class RealSenseCamera:
         point_3d = rs.rs2_deproject_pixel_to_point(intrin, [px, py], depth)
         return Point3D(point_3d[0], point_3d[1], point_3d[2])
 
-
-
+    @staticmethod
+    def show_img(img, title = "Image"):
+        print("[CAM] show image starts")
+        cv2.imshow(title, img)
+        
+        # Бесконечный цикл, который держит окно открытым
+        while True:
+            key = cv2.waitKey(1) & 0xFF
+            
+            # Если нажали 'i' - закрываем окно и выходим из функции (идем дальше по коду)
+            if key == ord('i'):
+                cv2.destroyAllWindows()
+                break
+                
+            # Опционально: если нажали 'q' - тоже закрываем (на всякий случай)
+            elif key == ord('q'):
+                cv2.destroyAllWindows()
+                break

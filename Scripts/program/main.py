@@ -20,6 +20,7 @@ def main():
     try:
         cam.start()
         robot.connect()
+        robot.toggle_free_drive()
     except Exception as e:
         print(f"Failed to initialize hardware: {e}")
         return
@@ -35,14 +36,18 @@ def main():
         return
 
     # 3. Get VLM Coordinates
-    pred = vlm.send_request(prompt, image, "pointing")
+    pred, img = vlm.send_request(prompt, image, "pointing")
     if not pred:
         print("[MAIN] No prediction.")
         return
+    print("[MAIN]", pred)
+
+    if(img is not None):
+        cam.show_img(img=img)
 
     data = vlm.safe_parse(pred)
     coords = data[0]
-    print(f"coords {coords}")
+    print(f"coords: {coords}, name: {data[-1]}")
 
     # data = vlm.get_coordinates(pred)
     # if not data:
@@ -59,11 +64,11 @@ def main():
     target.convert_vlm_to_image(cam.width, cam.height)
 
     # 5. Get Angle (Requires a second camera capture in your logic)
-    angle = vlm.get_object_angle(target, cam)
+    angle, img = vlm.get_object_angle(target, cam)
     if target.angle is None:
         return
 
-    print(f"ahgle = {angle}")
+    print(f"angle = {angle}")
 
     angle_data = vlm.safe_parse(angle)
     print(angle_data)

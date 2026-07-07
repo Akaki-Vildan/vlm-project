@@ -18,7 +18,7 @@ class VLMProcessor:
         print("[STATUS] Loading local model weights...")
         self.model = UnifiedInference(LOCAL_MODEL_PATH)
 
-    def send_request(self, prompt_text, image_data, task, do_sample=True, temperature=0.7):
+    def send_request(self, prompt_text, image_data, task, do_sample=True, temperature=0.7, plot=False):
         temp_file_path = None
         if isinstance(image_data, np.ndarray):
             tf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
@@ -30,7 +30,7 @@ class VLMProcessor:
             image_to_send = image_data
 
         try:
-            return self.model.inference(prompt_text, image_to_send, task=task, do_sample=do_sample, temperature=temperature)
+            return self.model.inference(prompt_text, image_to_send, task=task, do_sample=do_sample, temperature=temperature, plot=plot)
         finally:
             if temp_file_path and os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
@@ -76,7 +76,6 @@ class VLMProcessor:
 
         return None
 
-    @staticmethod
     @staticmethod
     def create_angle_image(image, px, py, radius=100):
         img = image.copy()
@@ -169,7 +168,7 @@ class VLMProcessor:
             elif key == ord('p'):
                 cv2.destroyAllWindows()
                 # NOW we do the heavy inference, after the window is closed or updated
-                return self.send_request(prompt, image_with_angles, "find_angle", do_sample=True, temperature=0.5)
+                return self.send_request(prompt, image_with_angles, "find_angle", do_sample=False, temperature=0.5)
 
             return None
     
