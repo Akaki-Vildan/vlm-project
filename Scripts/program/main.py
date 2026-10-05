@@ -20,7 +20,7 @@ def main():
     try:
         cam.start()
         robot.connect()
-        robot.toggle_free_drive()
+        #robot.toggle_free_drive()
     except Exception as e:
         print(f"Failed to initialize hardware: {e}")
         return
@@ -31,7 +31,8 @@ def main():
         print("No image captured.")
         return
 
-    prompt = input('Get prompt: ')
+    #prompt = input('Get prompt: ')
+    prompt = "Pickup a black cube without any images on it. And it must be in open air, not in the box or covered by anything"
     if not prompt:
         return
 
