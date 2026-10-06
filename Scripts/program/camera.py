@@ -78,6 +78,73 @@ class RealSenseCamera:
         point_3d = rs.rs2_deproject_pixel_to_point(intrin, [px, py], depth)
         return Point3D(point_3d[0], point_3d[1], point_3d[2])
 
+    def process_image_from_vlm(image, bbox):
+        """
+        Находит контур искомого объекта по bounding box и возвращает 
+        изображение с нарисованным контуром и координаты центра.
+        
+        :param image: Исходное изображение (numpy.ndarray, формат BGR)
+        :param bbox: Координаты области в формате [x1, y1, x2, y2]
+        :return: Изображение с контуром (numpy.ndarray), координаты центра (cx, cy)
+        """
+        if not isinstance(image, np.ndarray):
+            raise ValueError("На вход ожидается изображение в формате numpy.ndarray")
+
+        x1, y1, x2, y2 = bbox
+
+        # Защита от выхода за границы изображения
+        h, w = image.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, int(x2)), min(h, int(y2))
+
+        # 1. Вырезаем область (ROI)
+        roi = image[y1:y2, x1:x2]
+
+        # Если область получилась пустой (например, некорректные координаты)
+        if roi.size == 0:
+            return image.copy(), None
+
+        # 2. Подготовка: перевод в Ч/Б и размытие для удаления шума
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # 3. Выделение границ (Canny)
+        edges = cv2.Canny(blurred, 50, 150)
+        
+        # Замыкаем возможные разрывы в контуре
+        kernel = np.ones((3, 3), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=1)
+
+        # 4. Поиск контуров внутри вырезанной области
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            return image.copy(), None
+
+        # 5. Выбираем самый большой контур
+        largest_contour = max(contours, key=cv2.contourArea)
+
+        # 6. Сдвигаем координаты контура в систему координат ИСХОДНОГО изображения
+        shifted_contour = largest_contour + np.array([x1, y1])
+
+        # 7. Вычисление центра объекта с помощью пространственных моментов
+        M = cv2.moments(shifted_contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+        else:
+            # Резервный вариант: центр Bounding Box
+            cx = x1 + (x2 - x1) // 2
+            cy = y1 + (y2 - y1) // 2
+
+        # 8. Рисуем контур и центр на копии исходного изображения
+        result_image = image.copy()
+        
+        cv2.drawContours(result_image, [shifted_contour], -1, (0, 255, 0), 2)
+        cv2.circle(result_image, (cx, cy), 5, (0, 0, 255), -1)
+
+        return result_image, (cx, cy)
+
     @staticmethod
     def show_img(img, title = "Image"):
         print("[CAM] show image starts")

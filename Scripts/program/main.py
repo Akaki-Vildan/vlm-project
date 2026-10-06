@@ -59,6 +59,8 @@ def main():
     coords = data[0]
     print(f"coords: {coords}, name: {data[-1]}")
 
+    # Try to get a countor finder
+
     # data = vlm.get_coordinates(pred)
     # if not data:
     #     print("[MAIN] Failed to parse JSON.")
@@ -72,6 +74,10 @@ def main():
         angle=0
     )
     target.convert_vlm_to_image(cam.width, cam.height)
+
+    countor_img = cam.process_image_from_vlm(image, (target.vlm_point.x, target.vlm_point.y))
+    if(countor_img is not None):
+        cam.show_img(img=countor_img)
 
     # 5. Get Angle (Requires a second camera capture in your logic)
     angle, img = vlm.get_object_angle(target, cam)
