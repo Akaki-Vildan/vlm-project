@@ -84,13 +84,17 @@ class RealSenseCamera:
         изображение с нарисованным контуром и координаты центра.
         
         :param image: Исходное изображение (numpy.ndarray, формат BGR)
-        :param bbox: Координаты области в формате [x1, y1, x2, y2]
+        :param bbox: target.area = [Point2D, Point2D]
         :return: Изображение с контуром (numpy.ndarray), координаты центра (cx, cy)
         """
         if not isinstance(image, np.ndarray):
             raise ValueError("На вход ожидается изображение в формате numpy.ndarray")
 
-        x1, y1, x2, y2 = bbox
+        first_point, second_point = bbox
+        x1 = first_point.x
+        y1 = first_point.y
+        x2 = second_point.x
+        y2 = second_point.y
 
         # Защита от выхода за границы изображения
         h, w = image.shape[:2]

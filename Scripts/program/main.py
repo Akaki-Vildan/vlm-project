@@ -71,14 +71,23 @@ def main():
     if(task == 2):
         # 4. Create Object & Calculate Image Coords
         target = DetectedObject(
-            name=data[-1], 
+            name=data[-1],
             vlm_point=Point2D(x=int(coords[0]), y=int(coords[1])),
             angle=0,
-            area=Area2D(fx = int(coords[0]), fy = int(coords[1]), sx = int(coords[2]), sy = int(coords[3]))
+        )
+        target.convert_vlm_to_image(cam.width, cam.height)
+        target.create_area(coords)
+    else:
+        # 4. Create Object & Calculate Image Coords
+        target = DetectedObject(
+            name=data[-1],
+            vlm_point=Point2D(x=int(coords[0]), y=int(coords[1])),
+            angle=0,
+            area=None
         )
         target.convert_vlm_to_image(cam.width, cam.height)
 
-    countor_img = cam.process_image_from_vlm(image, (target.area.fx, target.area.fy, target.area.sx, target.area.sy))
+    countor_img = cam.process_image_from_vlm(image, target.area)
     if(countor_img is not None):
         cam.show_img(img=countor_img)
 
@@ -95,9 +104,9 @@ def main():
 
     # 6. Calculate Camera 3D Coords
     target.camera_point = cam.deproject_pixel(
-        target.image_point.x, 
-        target.image_point.y, 
-        depth_image, 
+        target.image_point.x,
+        target.image_point.y,
+        depth_image,
         intrin
     )
     if target.camera_point is None:
