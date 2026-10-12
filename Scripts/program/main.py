@@ -6,7 +6,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-from utils import DetectedObject, Point2D
+from utils import DetectedObject, Point2D, Area2D
 from camera import RealSenseCamera
 from robot import RobotController
 from vlm import VLMProcessor
@@ -46,7 +46,9 @@ def main():
     '''
 
     # 3. Get VLM Coordinates
-    pred, img = vlm.send_request(prompt, image, "pointing")
+    task = 2
+    tasks = ["pointing", "trajectory", "grounding", "positioning", "find_angle"]
+    pred, img = vlm.send_request(prompt, image, tasks[task])
     if not pred:
         print("[MAIN] No prediction.")
         return
@@ -66,16 +68,17 @@ def main():
     #     print("[MAIN] Failed to parse JSON.")
     #     return
     
+    if(task == 2):
+        # 4. Create Object & Calculate Image Coords
+        target = DetectedObject(
+            name=data[-1], 
+            vlm_point=Point2D(x=int(coords[0]), y=int(coords[1])),
+            angle=0,
+            area=Area2D(fx = int(coords[0]), fy = int(coords[1]), sx = int(coords[2]), sy = int(coords[3]))
+        )
+        target.convert_vlm_to_image(cam.width, cam.height)
 
-    # 4. Create Object & Calculate Image Coords
-    target = DetectedObject(
-        name=data[-1], 
-        vlm_point=Point2D(x=int(coords[0]), y=int(coords[1])),
-        angle=0
-    )
-    target.convert_vlm_to_image(cam.width, cam.height)
-
-    countor_img = cam.process_image_from_vlm(image, (target.vlm_point.x, target.vlm_point.y))
+    countor_img = cam.process_image_from_vlm(image, (target.area.fx, target.area.fy, target.area.sx, target.area.sy))
     if(countor_img is not None):
         cam.show_img(img=countor_img)
 
