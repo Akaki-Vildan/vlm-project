@@ -1,6 +1,7 @@
 import sys
 import os
 import cv2
+import numpy as np
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
@@ -32,7 +33,7 @@ def main():
         return
 
     #prompt = input('Get prompt: ')
-    prompt = "Pickup a black cube without any images on it. And it must be in open air, not in the box or covered by anything"
+    prompt = "Pickup a black cube."
     if not prompt:
         return
 
@@ -48,7 +49,7 @@ def main():
     # 3. Get VLM Coordinates
     task = 2
     tasks = ["pointing", "trajectory", "grounding", "positioning", "find_angle"]
-    pred, img = vlm.send_request(prompt, image, tasks[task])
+    pred, img = vlm.send_request(prompt, image, tasks[task], plot=True)
     if not pred:
         print("[MAIN] No prediction.")
         return
@@ -76,7 +77,7 @@ def main():
             angle=0,
         )
         target.convert_vlm_to_image(cam.width, cam.height)
-        target.create_area(coords)
+        target.create_area(cam.width, cam.height, coords)
     else:
         # 4. Create Object & Calculate Image Coords
         target = DetectedObject(
@@ -87,14 +88,29 @@ def main():
         )
         target.convert_vlm_to_image(cam.width, cam.height)
 
-    countor_img = cam.process_image_from_vlm(image, target.area)
-    if(countor_img is not None):
-        cam.show_img(img=countor_img)
 
-    # 5. Get Angle (Requires a second camera capture in your logic)
-    angle, img = vlm.get_object_angle(target, cam)
-    if target.angle is None:
-        return
+    countor_img, center = cam.process_image_from_vlm(image, target.area.first_point, target.area.second_point)
+
+    if countor_img is not None:
+        cam.show_img(img=countor_img, title="Countors")
+
+    if center is not None:
+        print(f"[MAIN] Contour center: {center}")
+        if countor_img is not None:
+            # If it's a boolean mask, convert it
+            if isinstance(countor_img, np.ndarray) and countor_img.dtype == bool:
+                countor_img = (countor_img * 255).astype(np.uint8)
+        
+        # Only show if it's actually a valid image (2D or 3D numpy array with numeric dtype)
+        if isinstance(countor_img, np.ndarray) and countor_img.ndim in (2, 3):
+            cam.show_img(img=countor_img)
+        else:
+            print(f"[MAIN] process_image_from_vlm returned invalid type: {type(countor_img)}")
+
+        # 5. Get Angle (Requires a second camera capture in your logic)
+        angle, img = vlm.get_object_angle(target, cam)
+        if target.angle is None:
+            return
 
     print(f"angle = {angle}")
 

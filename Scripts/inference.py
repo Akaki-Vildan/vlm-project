@@ -44,7 +44,7 @@ prompt_trajectory = """OUTPUT RULES (STRICTLY ENFORCED):
 prompt_grounding = """OUTPUT RULES (STRICTLY ENFORCED):
 1. Output ONLY a valid Python list containing the bounding box and the object name.
 2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
-3. Format: [[[x1, y1, x2, y2]], "object_name"]
+3. Format: [[x1, y1, x2, y2], "object_name"]
 4. x1, y1 are top-left coords, x2, y2 are bottom-right coords (0~1000)."""
 
 prompt_positioning = """You are a precision spatial analysis AI. Your task is to locate the target object in the image and extract exactly 5 key structural points around it, plus its name.
@@ -171,7 +171,7 @@ class UnifiedInference:
             text = f"Task: \"{text}\"\n\n{prompt_trajectory}"
         elif task == "grounding":
             print("Grounding task detected. Adding grounding prompt.")
-            text = f"Please provide the bounding box coordinate of the region this sentence describes: {text}."
+            text = f"Please provide the bounding box coordinate of the region this sentence describes: {text}. \"{text}\"\n\n{prompt_grounding}"
         elif task == "positioning":
             print("Positioning task detected. Adding positioning prompt.")
             text = f"{text}\n\n{prompt_positioning}"

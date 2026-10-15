@@ -78,7 +78,7 @@ class RealSenseCamera:
         point_3d = rs.rs2_deproject_pixel_to_point(intrin, [px, py], depth)
         return Point3D(point_3d[0], point_3d[1], point_3d[2])
 
-    def process_image_from_vlm(image, bbox):
+    def process_image_from_vlm(self, image, first_point, second_point):
         """
         Находит контур искомого объекта по bounding box и возвращает 
         изображение с нарисованным контуром и координаты центра.
@@ -90,7 +90,6 @@ class RealSenseCamera:
         if not isinstance(image, np.ndarray):
             raise ValueError("На вход ожидается изображение в формате numpy.ndarray")
 
-        first_point, second_point = bbox
         x1 = first_point.x
         y1 = first_point.y
         x2 = second_point.x
@@ -145,9 +144,10 @@ class RealSenseCamera:
         result_image = image.copy()
         
         cv2.drawContours(result_image, [shifted_contour], -1, (0, 255, 0), 2)
-        cv2.circle(result_image, (cx, cy), 5, (0, 0, 255), -1)
+        #cv2.circle(result_image, (cx, cy), 5, (0, 0, 255), -1)
 
-        return result_image, (cx, cy)
+        center = (cx, cy)
+        return result_image, center
 
     @staticmethod
     def show_img(img, title = "Image"):
