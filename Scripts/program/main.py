@@ -33,7 +33,7 @@ def main():
         return
 
     #prompt = input('Get prompt: ')
-    prompt = "Pickup a black cube."
+    prompt = "Pickup a bottle by the neck"
     if not prompt:
         return
 
@@ -46,7 +46,7 @@ def main():
     2-я идея про угол: берем bounding box и внутри него работает методами cv находим угол. 
     '''
 
-    # 3. Get VLM Coordinates
+    # 3. Get VLM area Coordinates
     task = 2
     tasks = ["pointing", "trajectory", "grounding", "positioning", "find_angle"]
     pred, img = vlm.send_request(prompt, image, tasks[task], plot=True)
@@ -56,7 +56,7 @@ def main():
     print("[MAIN]", pred)
 
     if(img is not None):
-        cam.show_img(img=img)
+        cam.show_img(img=img, title="Image from vlm")
 
     data = vlm.safe_parse(pred)
     coords = data[0]
@@ -89,7 +89,7 @@ def main():
         target.convert_vlm_to_image(cam.width, cam.height)
 
 
-    countor_img, center = cam.process_image_from_vlm(image, target.area.first_point, target.area.second_point)
+    countor_img, center, countor = cam.process_image_from_vlm(image, target.area.first_point, target.area.second_point)
 
     if countor_img is not None:
         cam.show_img(img=countor_img, title="Countors")
@@ -107,16 +107,39 @@ def main():
         else:
             print(f"[MAIN] process_image_from_vlm returned invalid type: {type(countor_img)}")
 
-        # 5. Get Angle (Requires a second camera capture in your logic)
-        angle, img = vlm.get_object_angle(target, cam)
-        if target.angle is None:
-            return
+        # # 5. Get Angle (Requires a second camera capture in your logic)
+        # angle, img = vlm.get_object_angle(target, cam)
+        # if target.angle is None:
+        #     return
+        angle = cam.get_rotation_angle(countor)
 
     print(f"angle = {angle}")
 
-    angle_data = vlm.safe_parse(angle)
-    print(angle_data)
-    target.angle = angle_data[0][0]
+    # angle_data = vlm.safe_parse(angle)
+    # print(angle_data)
+    target.angle = angle
+
+    #get a pickup position coords
+    pred, img = vlm.send_request(prompt, image, tasks[0], plot=True)
+    if not pred:
+        print("[MAIN] No prediction.")
+        return
+    print("[MAIN]", pred)
+
+
+    data = vlm.safe_parse(pred)
+    coords = data[0]
+    print(f"coords: {coords}, name: {data[-1]}")
+
+    # 4. Create Object & Calculate Image Coords
+
+    target.vlm_point.x = coords[0] 
+    target.vlm_point.y = coords[1] 
+    target.convert_vlm_to_image(cam.width, cam.height)
+
+    if(img is not None):
+        cv2.circle(img, (target.image_point.x, target.image_point.y), 5, (0, 0, 255), -1)
+        cam.show_img(img=img, title="Image from vlm pickup coords")
 
     # 6. Calculate Camera 3D Coords
     target.camera_point = cam.deproject_pixel(

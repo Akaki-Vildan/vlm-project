@@ -90,10 +90,12 @@ class RealSenseCamera:
         if not isinstance(image, np.ndarray):
             raise ValueError("На вход ожидается изображение в формате numpy.ndarray")
 
-        x1 = first_point.x
-        y1 = first_point.y
-        x2 = second_point.x
-        y2 = second_point.y
+        x1 = first_point.x - 10
+        y1 = first_point.y - 10
+        x2 = second_point.x + 10
+        y2 = second_point.y + 10
+
+        print(f"[CAMERA] Coords in the start of the process image from vlm fuction: x1: {x1}, y1: {y1}, x2: {x2}, y2:{y2}")
 
         # Защита от выхода за границы изображения
         h, w = image.shape[:2]
@@ -102,14 +104,20 @@ class RealSenseCamera:
 
         # 1. Вырезаем область (ROI)
         roi = image[y1:y2, x1:x2]
+        rect_img = image.copy()
+        cv2.rectangle(rect_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        self.show_img(img=rect_img, title="Area")
 
         # Если область получилась пустой (например, некорректные координаты)
         if roi.size == 0:
+            print("[CAMERA] Roi size is wrong")
             return image.copy(), None
 
         # 2. Подготовка: перевод в Ч/Б и размытие для удаления шума
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        self.show_img(img=gray, title="Roi")
 
         # 3. Выделение границ (Canny)
         edges = cv2.Canny(blurred, 50, 150)
@@ -122,6 +130,7 @@ class RealSenseCamera:
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
+            print("[CAMERA] There are no countors")
             return image.copy(), None
 
         # 5. Выбираем самый большой контур
@@ -144,10 +153,10 @@ class RealSenseCamera:
         result_image = image.copy()
         
         cv2.drawContours(result_image, [shifted_contour], -1, (0, 255, 0), 2)
-        #cv2.circle(result_image, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.circle(result_image, (cx, cy), 5, (0, 0, 255), -1)
 
         center = (cx, cy)
-        return result_image, center
+        return result_image, center, shifted_contour
 
     @staticmethod
     def show_img(img, title = "Image"):
@@ -167,3 +176,20 @@ class RealSenseCamera:
             elif key == ord('q'):
                 cv2.destroyAllWindows()
                 break
+
+
+    def get_rotation_angle(self, contour):
+        """
+        Возвращает угол поворота объекта относительно оси X (в градусах).
+        Положительный угол — против часовой стрелки.
+        """
+        rect = cv2.minAreaRect(contour)   # (center, (w, h), angle)
+        angle = rect[2]
+
+        # cv2.minAreaRect возвращает угол в диапазоне (-90, 0].
+        # Приводим к диапазону [0, 180) — угол длинной стороны относительно оси X.
+        w, h = rect[1]
+        if w < h:
+            angle = 90 + angle
+
+        return angle

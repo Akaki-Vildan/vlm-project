@@ -72,15 +72,15 @@ class RobotController:
 
         # 3. Target Z
         target_z = point_base_xyz[2] + TARGET_OFFSET_Z
-        target_pos_base = [point_base_xyz[0], point_base_xyz[1], target_z]
+        target_pos_base = [point_base_xyz[0], point_base_xyz[1], target_z - 0.005]
         target_pos_base_5 = [point_base_xyz[0], point_base_xyz[1], target_z + 0.05]
         target_pos_base_1 = [point_base_xyz[0], point_base_xyz[1], target_z + 0.02]
 
         # 4. Angle calculation
         if target_obj.angle > 0:
-            target_yaw_rad = target_obj.angle - math.pi / 2
+            target_yaw_rad = math.radians(target_obj.angle)
         else:
-            target_yaw_rad = target_obj.angle + math.pi / 2
+            target_yaw_rad = math.radians(target_obj.angle)
 
         
             
@@ -118,8 +118,8 @@ class RobotController:
         
         steps = [
             ("Move to approach 1", targets[1]),
-            ("Move to target", targets[0]),
-            ("Move to grip", targets[2])
+            ("Move to target", targets[2]),
+            ("Move to grip", targets[0])
         ]
         
         for name, pos in steps:
@@ -130,11 +130,12 @@ class RobotController:
             time.sleep(0.5)
             
         # Grip and go home
+        time.sleep(4)
         self.robot.set_digital_output_high(1) 
         self.robot.await_stop()
         time.sleep(0.5)
         self.go_home()
-        self.robot.set_digital_output_low(1)
+        #self.robot.set_digital_output_low(1)
 
     def toggle_free_drive(self):
         self.robot.zg_on()

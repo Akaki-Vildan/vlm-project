@@ -21,18 +21,18 @@ You MUST output coordinates in a relative scale from 0 to 1000. Do NOT output ra
 OUTPUT RULES (STRICTLY ENFORCED):
 1. Output ONLY a valid Python list containing tuples and the object name.
 2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
-3. Format: [((x1, y1, d1), (x2, y2, d2), ...), "object_name"]
+3. Format: [[[x1, y1, d1], [x2, y2, d2], ...], "object_name"]
 4. x, y MUST be integers between 0 and 1000. d MUST be a float.
 
 EXAMPLES:
 Command: "Get ready to pick up the blue cup by its handle"
-Answer: [((620, 450, 0.5),), "blue cup"]
+Answer: [[620, 450, 0.5], "blue cup"]
 
 Command: "Point to the top-left corner of the red box"
-Answer: [((300, 200, 0.8),), "red box"]
+Answer: [[300, 200, 0.8], "red box"]
 
 Command: "Show me both wheels of the robot"
-Answer: [((250, 700, 0.6), (750, 700, 0.6)), "robot"]
+Answer: [[[250, 700, 0.6], [750, 700, 0.6]], "robot"]
 """
 
 prompt_trajectory = """OUTPUT RULES (STRICTLY ENFORCED):
@@ -68,7 +68,7 @@ OUTPUT RULES (STRICTLY ENFORCED):
 1. Output ONLY a valid Python list.
 2. NO explanations, NO markdown (no ``` blocks), NO quotes around the whole answer.
 3. The structure MUST be a list containing ONE tuple of 5 points, followed by the object name string.
-4. Format: [((x0, y0, d0), (x1, y1, d1), (x2, y2, d2), (x3, y3, d3), (x4, y4, d4)), "object_name"]
+4. Format: [[[x0, y0, d0], [x1, y1, d1], [x2, y2, d2], (x3, y3, d3), (x4, y4, d4)), "object_name"]
 
 EXAMPLE:
 If a red cup is in the center of the image at 0.4 meters depth:
@@ -171,7 +171,7 @@ class UnifiedInference:
             text = f"Task: \"{text}\"\n\n{prompt_trajectory}"
         elif task == "grounding":
             print("Grounding task detected. Adding grounding prompt.")
-            text = f"Please provide the bounding box coordinate of the region this sentence describes: {text}. \"{text}\"\n\n{prompt_grounding}"
+            text = f"Please provide the bounding box coordinate of the region this sentence describes: {text}. \n\n{prompt_grounding}"
         elif task == "positioning":
             print("Positioning task detected. Adding positioning prompt.")
             text = f"{text}\n\n{prompt_positioning}"

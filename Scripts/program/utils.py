@@ -39,10 +39,10 @@ class DetectedObject:
         else:
             x, y = points
             res.append(int(round(x / vlm_space * camera_width)))
-            res.append(int(round(y / vlm_space * camera_width)))
+            res.append(int(round(y / vlm_space * camera_height)))
             return res
 
-    def create_area(self, camera_width: int, camera_height: int,points):
+    def create_area(self, camera_width: int, camera_height: int, points):
         '''
         Get's a points and convert it into area in target
         '''
