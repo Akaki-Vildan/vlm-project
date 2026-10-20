@@ -2,6 +2,7 @@ import os
 import re
 import ast
 import math
+import json
 from typing import Union
 
 import cv2
@@ -161,6 +162,195 @@ The handle of a cup points exactly at the "-pi/4" line: [[-0.7854, "blue cup"]]
 A pen points exactly halfway between "0" and "pi/4": [[0.3927, "pen"]]
 """
 
+# =============================================================================
+# PLANNER PROMPT  (decomposes a high-level task into a list of sub-steps)
+# =============================================================================
+
+prompt_planing = """You are a multimodal vision-language model (VLM) mounted on a robotic arm with 6+ degrees of freedom. The camera is attached to the end of the manipulator (eye-in-hand configuration). You are not a chatbot. You are the sensorimotor brain of the manipulator.
+
+You are currently operating in PLANNER mode. This means: you DO NOT move the manipulator. You DO NOT return coordinates. You receive a high-level user task and a scene image, analyze them, and decompose the task into a sequence of subtasks. The resulting plan will be passed to an Executor that will run each step one by one (the Executor is implemented by separate pointing / trajectory / grounding / general inference calls).
+
+YOU are the one solving the task. Decomposition is also solving. You are responsible for ensuring the plan is complete, consistent, executable, and covers all stages of the original task.
+
+────────────────────────────────────────
+1. HARDWARE CONFIGURATION
+────────────────────────────────────────
+
+• Manipulator: robotic arm with 6+ DOF.
+• Camera: eye-in-hand — mounted on the flange/gripper, moves with the manipulator.
+• Coordinate system used by downstream Executor calls: relative scale 0–1000 (NOT raw pixels). X: 0 = LEFT, 1000 = RIGHT. Y: 0 = TOP, 1000 = BOTTOM. Depth: float in meters.
+• Camera-to-robot calibration is applied outside your loop. In PLANNER mode you do not return coordinates — you only return the plan. The plan will be passed to the Executor — a second stage that sends movement commands step by step.
+
+────────────────────────────────────────
+2. FOUR SUBTASK TYPES
+────────────────────────────────────────
+
+Every plan step must have exactly one of four types. The type MUST be one of these exact lowercase strings: "general", "pointing", "trajectory", "grounding".
+
+1. "general"
+   Ordinary reasoning that does not require manipulator motion.
+   Example: "Determine which parts are missing from the assembly", "Assess assembly stability".
+   The Executor in this step returns a text answer, not coordinates.
+
+2. "pointing"
+   Find a single point on the image — the center of an object, a grasp point, a target point.
+   The Executor returns a pair (x, y, depth).
+   Example: "Find the center of the mug handle", "Identify the placement point on the right side of the table".
+
+3. "trajectory"
+   Find a sequence of motion points — waypoints from the current position to the target, with obstacle avoidance.
+   The Executor returns a list of waypoints.
+   Example: "Plan a path from the grasp point to the placement point, avoiding the standing glass".
+
+4. "grounding"
+   Find a rectangular region on the image — a bounding box of an object or a zone.
+   The Executor returns (x1, y1, x2, y2).
+   Example: "Locate the region containing the entire mug", "Identify the right-half zone of the table".
+
+────────────────────────────────────────
+3. PLANNING PROTOCOL
+────────────────────────────────────────
+
+STAGE 1 — REQUEST ANALYSIS
+• Restate the user task in your own words.
+• Identify the object of the action, the target, and any constraints (e.g., "right side of the table").
+• If the task requires scene-state analysis ("what needs to be done for the assembly to be complete?"), determine what kind of analysis is needed.
+
+STAGE 2 — VISUAL INSPECTION
+• Scan the scene image.
+• Record visible objects, their relative positions, obstacles, free zones, landmarks (e.g., center of the table, right side).
+• Separate facts (what is clearly visible) from interpretations.
+
+STAGE 3 — DECOMPOSITION
+• Break the task into the minimum necessary number of subtasks. Do not over-split (not "look at the mug" -> "recognize the mug" -> "find the handle" -> ...), but also do not merge different-type actions into one step.
+• Every subtask must have exactly one type. If one subtask requires both finding a point and planning a trajectory, those are two separate steps.
+• Logical order: first "general" (if analysis is needed), then "grounding"/"pointing" (find objects and points), then "trajectory" (plan the path), then "pointing" again (placement point).
+
+STAGE 4 — TYPE ASSIGNMENT
+• For each step, choose a type from the four: "general" / "pointing" / "trajectory" / "grounding".
+
+STAGE 5 — DEPENDENCIES & ORDER
+• Each step should logically follow from previous ones.
+• A trajectory to a target depends on pointing that target.
+• There must be no cyclic dependencies.
+
+STAGE 6 — SELF-SUFFICIENT DESCRIPTIONS
+• The description of each step MUST be a single self-contained sentence. The Executor will receive ONLY this description (no other context) and must be able to execute the step from this sentence alone.
+• Include in the description: WHAT to find/do, WHERE (on which object / in which zone), and (when relevant) WHICH previous step's result to use.
+
+STAGE 7 — PLAN SELF-CHECK
+• Does the plan cover the entire original user task?
+• Are all steps executable from their description alone?
+• Do all steps have an unambiguous, valid type?
+• Are there no contradictions between steps?
+
+────────────────────────────────────────
+4. OUTPUT FORMAT (STRICT)
+────────────────────────────────────────
+
+Output a single JSON-like Python list of lists. Each inner list has EXACTLY TWO elements: [description, type]. No text before or after the list. No markdown. No explanations.
+
+Format:
+[["<description of step 1>", "<type1>"], ["<description of step 2>", "<type2>"], ...]
+
+FORMAT RULES:
+• type MUST be one of the exact lowercase strings: "general", "pointing", "trajectory", "grounding".
+• description MUST be a single non-empty string, written as a self-contained instruction the Executor can act on directly.
+• description MUST NOT contain double quotes inside (use single quotes if needed).
+• description MUST NOT contain newline characters.
+• The order of steps in the list = execution order.
+• Output ONLY the list. No surrounding text, no markdown code fences.
+
+If the plan cannot be built (ambiguous task, insufficient image data), output exactly:
+[["ERROR: <short reason>", "general"]]
+
+────────────────────────────────────────
+5. EXAMPLE — "Move the mug to the right side of the table"
+────────────────────────────────────────
+
+[["Locate the bounding box of the entire mug, including the handle, on the current frame", "grounding"], ["Find the grasp point at the center of the mug handle, inside the bounding box from the previous step", "pointing"], ["Identify a free rectangular zone in the right half of the table where the mug can be placed without overlapping other objects", "grounding"], ["Find the placement point at the center of the free zone from the previous step", "pointing"], ["Plan a trajectory from the grasp point to the placement point, passing through a safe upper zone above the table and avoiding any visible obstacles", "trajectory"]]
+
+────────────────────────────────────────
+6. EXAMPLE — "What needs to be done for the assembly to be complete?"
+────────────────────────────────────────
+
+[["Analyze the current state of the assembly on the image and determine which elements are missing, with their assumed positions", "general"], ["Find the rectangular region where the first missing element should be placed, not overlapping existing elements", "grounding"], ["Find the installation point at the center of the region from the previous step", "pointing"], ["Plan a trajectory from the current manipulator position to the installation point, avoiding the existing assembly elements", "trajectory"]]
+
+────────────────────────────────────────
+7. PLAN QUALITY CRITERIA
+────────────────────────────────────────
+
+• Minimal sufficiency: the plan contains the minimum number of steps covering the entire task. Extra steps are forbidden.
+• Type validity: each step's type is one of "general", "pointing", "trajectory", "grounding".
+• Completeness: after executing all steps, the original user task must be solved.
+• Self-sufficiency: each description is a single sentence the Executor can act on without additional context.
+• No motion: in PLANNER mode, you never return coordinates. Only the plan list.
+
+────────────────────────────────────────
+8. SELF-REMINDER BEFORE EVERY RESPONSE
+────────────────────────────────────────
+
+"I am a VLM in PLANNER mode. I do not move the manipulator. I analyze the image and the user task, decompose into steps. Each step is a pair [description, type] where type is one of general / pointing / trajectory / grounding. I return ONE Python list of such pairs. No text outside the list. The plan will be executed by the Executor — if the plan is bad, it is my fault. So I check the plan for completeness, valid types, self-sufficient descriptions, and correct ordering."
+
+────────────────────────────────────────
+9. FINAL RULE
+────────────────────────────────────────
+
+In PLANNER mode, your response is always either a single Python list of [description, type] pairs, or the special ERROR list. No other output. No explanations before or after the list. No markdown code fences.
+"""
+
+# =============================================================================
+# PLANNER VALIDATION PROMPT  (Stage-2 QC for the plan)
+# =============================================================================
+
+prompt_planing_validation = """
+=== PLANNER QUALITY CONTROL STAGE ===
+You are a strict plan validator. Your job is to verify that the ANSWER below is a valid
+plan produced by PLANNER mode, and to rewrite it if it does not conform.
+
+REQUIRED OUTPUT STRUCTURE (the plan MUST conform to this):
+{cliche}
+
+VALID TYPE STRINGS (and ONLY these):
+- "general"
+- "pointing"
+- "trajectory"
+- "grounding"
+
+OPERATOR ANSWER (from Stage 1):
+{answer}
+
+=== VALIDATION CHECKLIST (apply EVERY check) ===
+[ ] Is the answer a valid Python list literal? (mentally run ast.literal_eval)
+[ ] Is the outer container a list of pairs (each inner element is a list of length 2)?
+[ ] For each pair [description, type]:
+      - description is a non-empty string,
+      - type is one of the four valid strings above,
+      - description does not contain newline characters,
+      - description does not contain unescaped double quotes that break the literal.
+[ ] At least one step is present.
+[ ] No markdown (no ```), no surrounding text, no commentary, no placeholders.
+[ ] The first element of each pair is the DESCRIPTION (string), the second is the TYPE (string).
+    If they are swapped, swap them back.
+[ ] If the answer contains an "ERROR: ..." entry, keep it as the only entry.
+
+=== DECISION ===
+- If ALL checks pass (>= 95% match to required structure): return the ANSWER verbatim,
+  formatted as a single-line Python list literal.
+- If ANY check fails: REWRITE the answer to strictly conform to the required structure.
+  Preserve the original descriptions and types whenever possible. Fix only what is broken:
+    * Drop markdown fences / surrounding text.
+    * Coerce invalid type strings to the closest valid one
+      (e.g., "POINTING" -> "pointing", "point" -> "pointing", "traj" -> "trajectory").
+    * If a pair has the type as the first element and description as the second, swap them.
+    * If a pair has more than 2 elements, keep only [description, type].
+    * Strip newlines from descriptions.
+
+=== OUTPUT ===
+Return ONLY the final valid Python list literal on a single line.
+No explanations, no markdown, no "Here is the corrected version", no extra text before or after.
+"""
+
 
 # =============================================================================
 # GENERIC RULES  (appended to Stage-1 prompt to remind model of constraints)
@@ -266,10 +456,20 @@ class UnifiedInference:
       Stage 2 — Quality-control pass: validate the Stage-1 answer against the
                 CLICHE; if <95% match, rewrite it to strictly conform.
                 Optional extra retries via _looks_valid() Python-side check.
+
+    Supported tasks:
+      - general       : free-form text answer.
+      - planing       : decompose a high-level task into a list of [description, type] steps.
+                        The plan is validated against the plan CLICHE in Stage 2.
+      - pointing      : find point(s) (x, y, depth).
+      - trajectory     : find a list of waypoints.
+      - grounding      : find a bounding box (x1, y1, x2, y2).
+      - positioning    : find 5 structural points around the object.
+      - find_angle     : measure an edge angle in radians.
     """
 
     SUPPORTED_TASKS = (
-        "general", "pointing", "trajectory", "grounding", "positioning", "find_angle"
+        "general", "pointing", "trajectory", "grounding", "positioning", "find_angle", "planing"
     )
 
     TASK_PROMPTS = {
@@ -278,6 +478,7 @@ class UnifiedInference:
         "grounding":   prompt_grounding,
         "positioning": prompt_positioning,
         "find_angle":  prompt_find_angle,
+        "planing":     prompt_planing,
     }
 
     TASK_CLICHES = {
@@ -286,7 +487,18 @@ class UnifiedInference:
         "grounding":   '[[x1, y1, x2, y2], "object_name"]',
         "positioning": '[[[x0,y0,d0],[x1,y1,d1],[x2,y2,d2],[x3,y3,d3],[x4,y4,d4]], "object_name"]',
         "find_angle":  '[[angle_float_radians, "object_name"]]',
+        "planing":     '[["description_1", "type_1"], ["description_2", "type_2"], ...]  '
+                       'where each type is one of: "general", "pointing", "trajectory", "grounding"',
     }
+
+    # Tasks that should NOT go through the generic Stage-2 QC pass:
+    #   - "general" has no CLICHE to validate against.
+    #   - "planing" HAS its own dedicated validation prompt (prompt_planing_validation),
+    #     so it IS validated, just via a different code path.
+    TASKS_WITHOUT_GENERIC_QC = ("general",)
+
+    # Valid plan step types — used by _looks_valid() for the planing task.
+    VALID_PLAN_TYPES = ("general", "pointing", "trajectory", "grounding")
 
     def __init__(self, model_id="BAAI/RoboBrain2.5-8B-NV", device_map="auto"):
         """
@@ -392,12 +604,42 @@ class UnifiedInference:
         return s.strip()
 
     def _looks_valid(self, text: str, task: str) -> bool:
-        """Cheap AST-based sanity check whether the output matches the CLICHE."""
+        """Cheap AST-based sanity check whether the output matches the CLICHE.
+
+        For task == "planing" the expected structure is:
+            [["description", "type"], ...]
+        where description is a non-empty string and type is one of
+        self.VALID_PLAN_TYPES.
+        """
         s = self._strip_markdown(text)
         try:
             val = ast.literal_eval(s)
         except Exception:
-            return False
+            # Last-resort: try json.loads (handles double-quoted JSON).
+            try:
+                val = json.loads(s)
+            except Exception:
+                return False
+
+        # ---- planing-specific structural check ----
+        if task == "planing":
+            if not isinstance(val, list) or len(val) == 0:
+                return False
+            for entry in val:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    return False
+                description, step_type = entry
+                if not isinstance(description, str) or not description.strip():
+                    return False
+                if not isinstance(step_type, str):
+                    return False
+                if step_type.lower().strip() not in self.VALID_PLAN_TYPES:
+                    return False
+                if "\n" in description:
+                    return False
+            return True
+
+        # ---- generic CLICHE-based check for the other tasks ----
         if not isinstance(val, list) or len(val) != 2:
             return False
         payload, name = val
@@ -439,6 +681,14 @@ class UnifiedInference:
                   If _looks_valid() still fails after Stage 2, retry up to
                   `max_retries` additional correction passes.
 
+        For task == "planing":
+          - Stage 1 builds the plan with prompt_planing + the user task.
+          - Stage 2 validates the plan against prompt_planing_validation
+            (plan-specific QC, since plans have a different structure from
+            coordinate CLICHES).
+          - _looks_valid() does a structural check that each step is
+            [description_str, valid_type_str].
+
         Args:
             text (str): The input text prompt.
             image (Union[list,str]): The input image(s) — list of paths or single path.
@@ -456,11 +706,15 @@ class UnifiedInference:
         assert task in self.SUPPORTED_TASKS, \
             f"Invalid task type: {task}. Supported tasks are {self.SUPPORTED_TASKS}."
         assert task == "general" or len(image) == 1, \
-            "Pointing/grounding/trajectory/positioning/find_angle tasks require exactly one image."
+            "Pointing/grounding/trajectory/positioning/find_angle/planing tasks require exactly one image."
 
         # -------- Build Stage-1 prompt --------
         if task == "general":
             stage1_prompt = f"{text}"
+        elif task == "planing":
+            # Planner does not need the coordinate CLICHE / prompt_rules — it has
+            # its own self-contained prompt. We just append the user task.
+            stage1_prompt = f"{prompt_planing}\n\nUSER TASK: {text}"
         elif task == "grounding":
             stage1_prompt = (
                 f"Please provide the bounding box coordinate of the region this sentence describes: {text}.\n\n"
@@ -482,12 +736,46 @@ class UnifiedInference:
         except RuntimeError as e:
             print(f"[FATAL] Stage 1 generation failed: {e}")
             raise
-        print(f"\n[Stage 1 raw answer]\n{raw_answer}\n")
 
         # -------- Pass 2: QC + retries --------
-        if not validate or task == "general":
+        # Planing IS validated (with its own plan-specific QC prompt).
+        # Only "general" skips the generic Stage-2 QC (it has no CLICHE).
+        skip_generic_qc = (task in self.TASKS_WITHOUT_GENERIC_QC)
+
+        if not validate or skip_generic_qc:
             final_answer = raw_answer
+        elif task == "planing":
+            # Plan-specific Stage-2 QC.
+            validation_prompt = prompt_planing_validation.format(
+                cliche=self.TASK_CLICHES[task],
+                answer=raw_answer,
+            )
+            print(f"\n{'='*20} STAGE 2 — PLAN QC {'='*20}\n{validation_prompt}\n{'='*53}\n")
+            try:
+                final_answer = self._generate(validation_prompt, image, do_sample, temperature)
+                print(f"\n[Stage 2 validated plan]\n{final_answer}\n")
+            except RuntimeError as e:
+                print(f"[WARN] Stage 2 plan QC failed ({e}). Falling back to Stage 1 plan.")
+                final_answer = raw_answer
+
+            for attempt in range(max_retries):
+                if self._looks_valid(final_answer, task):
+                    print(f"[QC] Plan passes _looks_valid check.")
+                    break
+                print(f"[QC] Attempt {attempt+1}: plan still invalid — retrying correction pass...")
+                retry_prompt = prompt_planing_validation.format(
+                    cliche=self.TASK_CLICHES[task],
+                    answer=final_answer,
+                )
+                try:
+                    final_answer = self._generate(retry_prompt, image, do_sample, temperature)
+                    print(f"\n[Retry {attempt+1} plan]\n{final_answer}\n")
+                except RuntimeError as e:
+                    print(f"[WARN] Retry {attempt+1} failed ({e}). Stopping retries, keeping current plan.")
+                    break
         else:
+            # Generic coordinate-CLICHE QC for pointing / trajectory / grounding /
+            # positioning / find_angle.
             validation_prompt = prompt_validation.format(
                 cliche=self.TASK_CLICHES[task],
                 answer=raw_answer,

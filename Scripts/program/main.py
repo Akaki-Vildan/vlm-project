@@ -47,8 +47,8 @@ def main(prompt=None):
     '''
 
     # 3. Get VLM area Coordinates
-    task = 2
-    tasks = ["pointing", "trajectory", "grounding", "positioning", "find_angle"]
+    task = 5
+    tasks = ["pointing", "trajectory", "grounding", "positioning", "find_angle", "planing"]
     pred, img = vlm.send_request(prompt, image, tasks[task], plot=True)
     if not pred:
         print("[MAIN] No prediction.")
@@ -161,4 +161,4 @@ def main(prompt=None):
         robot.execute_move(move_targets)
 
 if __name__ == "__main__":
-    main("Pick up a cookies")
+    main()
