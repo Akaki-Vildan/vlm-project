@@ -12,7 +12,7 @@ from camera import RealSenseCamera
 from robot import RobotController
 from vlm import VLMProcessor
 
-def main():
+def main(prompt=None):
     # # 1. Initialize Systems (Hardware doesn't turn on until we call .start() or .connect())
     cam = RealSenseCamera()
     vlm = VLMProcessor()
@@ -32,10 +32,10 @@ def main():
         print("No image captured.")
         return
 
-    #prompt = input('Get prompt: ')
-    prompt = "Pickup a bottle by the neck"
-    if not prompt:
-        return
+    if prompt == None:
+        prompt = input('Get prompt: ')
+        if not prompt:
+            return
 
     '''
     Изменить структуру промпта можно и в inference. Идея следующая: Сделать цикличный промпт. Т.е. первый этап поиск точки захвата, второй этап контроль качества: 
@@ -161,4 +161,4 @@ def main():
         robot.execute_move(move_targets)
 
 if __name__ == "__main__":
-    main()
+    main("Pick up a cookies")

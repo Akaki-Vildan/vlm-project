@@ -1,11 +1,22 @@
+import os
+import sys
+
+# Добавляем РОДИТЕЛЬСКУЮ папку в sys.path ДО импорта inference
+# __file__ → текущий файл (find_mistakes.py в Scripts/useless/)
+# dirname один раз → Scripts/useless/
+# dirname дважды → Scripts/  ← здесь лежит inference.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Только ТЕПЕРЬ импортируем inference
 from inference import UnifiedInference
+
 import pyrealsense2 as rs
 import numpy as np
 import cv2
 import textwrap
 import tempfile
-import os
 import ast
+
 
 # Camera settings
 CAMERA_WIDTH = 640
