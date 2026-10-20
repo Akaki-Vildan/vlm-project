@@ -72,7 +72,7 @@ class RobotController:
 
         # 3. Target Z
         target_z = point_base_xyz[2] + TARGET_OFFSET_Z
-        target_pos_base = [point_base_xyz[0], point_base_xyz[1], target_z - 0.005]
+        target_pos_base = [point_base_xyz[0], point_base_xyz[1], target_z - 0.013]
         target_pos_base_5 = [point_base_xyz[0], point_base_xyz[1], target_z + 0.05]
         target_pos_base_1 = [point_base_xyz[0], point_base_xyz[1], target_z + 0.02]
 

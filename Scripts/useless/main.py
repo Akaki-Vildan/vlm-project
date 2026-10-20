@@ -1,10 +1,19 @@
-from Scripts.inference import UnifiedInference
+
+import os
+import sys
+
+# Добавляем РОДИТЕЛЬСКУЮ папку в sys.path ДО импорта inference
+# __file__ → текущий файл (find_mistakes.py в Scripts/useless/)
+# dirname один раз → Scripts/useless/
+# dirname дважды → Scripts/  ← здесь лежит inference.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from inference import UnifiedInference
 import pyrealsense2 as rs
 import numpy as np
 import cv2
 import textwrap
 import tempfile
-import os
 
 # Camera settings
 CAMERA_WIDTH = 640
@@ -72,7 +81,6 @@ def send_a_request(prompt_text, images_data):
             image_to_send = temp_file_path
 
         # 3. SEND TO MODEL
-        image_to_send = "Scripts/captured_photos/new image_1.png"
         pred, image = model.inference(prompt_text, image_to_send, task=taks_ar[task], plot=plot, do_sample=do_sample, temperature=temperature)
         print(f"\n=== Prediction ===\n{pred}\n==================\n")
     finally:
@@ -147,7 +155,7 @@ def main():
             # The prompt should tell the model that it's looking at two images side-by-side
             pred, image = send_a_request(prompt, color_img)
             print(type(image))
-            cv2.imshow("Result", image)
+            #cv2.imshow("Result", image)
             cv2.waitKey(0) # Wait for a key press to close the window
             cv2.destroyAllWindows() 
     finally:
