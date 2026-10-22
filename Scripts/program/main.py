@@ -12,7 +12,7 @@ from camera import RealSenseCamera
 from robot import RobotController
 from vlm import VLMProcessor
 
-def main(prompt=None):
+def main(prompt=None, typ="pick"):
     # # 1. Initialize Systems (Hardware doesn't turn on until we call .start() or .connect())
     cam = RealSenseCamera()
     vlm = VLMProcessor()
@@ -47,9 +47,9 @@ def main(prompt=None):
     '''
 
     # 3. Get VLM area Coordinates
-    task = 5
+    task = 2
     tasks = ["pointing", "trajectory", "grounding", "positioning", "find_angle", "planing"]
-    pred, img = vlm.send_request(prompt, image, tasks[task], plot=True)
+    pred, img = vlm.send_request(prompt, image, tasks[task], plot=False)
     if not pred:
         print("[MAIN] No prediction.")
         return
@@ -158,7 +158,8 @@ def main(prompt=None):
     move_targets = robot.get_target_positions(target, image)
     print(move_targets)
     if move_targets:
-        robot.execute_move(move_targets)
+        robot.execute_move(move_targets, type=typ)
 
 if __name__ == "__main__":
-    main()
+    main(typ='pick')
+    main(typ='put')

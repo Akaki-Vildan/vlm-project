@@ -36,7 +36,7 @@ class RobotController:
             
             self.go_home()
             time.sleep(0.5)
-            self.robot.set_digital_output_low(1)
+            #self.robot.set_digital_output_low(1)
             
             atexit.register(self.freeze)
         except Exception as e:
@@ -112,7 +112,7 @@ class RobotController:
             position(target_pos_base_1, output_rot)
         ]
 
-    def execute_move(self, targets):
+    def execute_move(self, targets, type='pick'):
         """Your sequential movement logic"""
         if not targets: return
         
@@ -131,7 +131,10 @@ class RobotController:
             
         # Grip and go home
         time.sleep(4)
-        self.robot.set_digital_output_high(1) 
+        if(type == 'pick'):
+            self.robot.set_digital_output_high(1) 
+        elif(type == 'put'):
+            self.robot.set_digital_output_low(1) 
         self.robot.await_stop()
         time.sleep(0.5)
         self.go_home()
