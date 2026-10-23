@@ -31,12 +31,12 @@ class RobotController:
         try:
             self.robot = RobotPulse(self.host)
             gripper = tool_info(position([0, 0, 0.1], [0, 0, math.pi / 4]))
-            self.robot.change_tool_info(gripper)
+            #self.robot.change_tool_info(gripper)
             print(f"Connected to robot at {self.host}")
             
             self.go_home()
             time.sleep(0.5)
-            #self.robot.set_digital_output_low(1)
+            self.robot.set_digital_output_low(1)
             
             atexit.register(self.freeze)
         except Exception as e:

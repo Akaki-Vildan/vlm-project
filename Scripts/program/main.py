@@ -47,7 +47,7 @@ def main(prompt=None, typ="pick"):
     '''
 
     # 3. Get VLM area Coordinates
-    task = 2
+    task = 0
     tasks = ["pointing", "trajectory", "grounding", "positioning", "find_angle", "planing"]
     pred, img = vlm.send_request(prompt, image, tasks[task], plot=False)
     if not pred:
@@ -120,7 +120,10 @@ def main(prompt=None, typ="pick"):
     target.angle = angle
 
     #get a pickup position coords
-    pred, img = vlm.send_request(prompt, image, tasks[0], plot=True)
+    images = []
+    images.append(image)
+    images.append(countor_img)
+    pred, img = vlm.send_request(f"{prompt} + there are 2 images u must to get point in frames area area", countor_img, tasks[0], plot=True)
     if not pred:
         print("[MAIN] No prediction.")
         return
