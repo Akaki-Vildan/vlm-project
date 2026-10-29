@@ -1,168 +1,18 @@
-import sys
-import os
-import cv2
-import numpy as np
-
+import sys, os
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
+from pipeline import PickAndPlacePipeline
 
-from utils import DetectedObject, Point2D, Area2D
-from camera import RealSenseCamera
-from robot import RobotController
-from vlm import VLMProcessor
 
-def main(prompt=None, typ="pick"):
-    # # 1. Initialize Systems (Hardware doesn't turn on until we call .start() or .connect())
-    cam = RealSenseCamera()
-    vlm = VLMProcessor()
-    robot = RobotController()
-
+def main():
+    pipeline = PickAndPlacePipeline()
     try:
-        cam.start()
-        robot.connect()
-        #robot.toggle_free_drive()
-    except Exception as e:
-        print(f"Failed to initialize hardware: {e}")
-        return
+        pipeline.setup()
+        pipeline.run_trajectory()  # вместо pipeline.run()
+    finally:
+        pipeline.cleanup()
 
-    # 2. Capture Frame
-    image, depth_image, intrin = cam.capture_frame()
-    if image is None:
-        print("No image captured.")
-        return
-
-    if prompt == None:
-        prompt = input('Get prompt: ')
-        if not prompt:
-            return
-
-    '''
-    Изменить структуру промпта можно и в inference. Идея следующая: Сделать цикличный промпт. Т.е. первый этап поиск точки захвата, второй этап контроль качества: 
-    проверяет полученный ответ с клише, если сходство более 95% то выдавать ответ, если нет, изменять так, чтоб подходил под клише. 
-    Так же в начале задается задача и клише ответа, который он должен выдать.
-
-    Теперь угол: попробовать выдавать 3 точки: центр и крайнюю точку, но это плохо будет работать, можно попроботвать додумать мб что-то получится
-    2-я идея про угол: берем bounding box и внутри него работает методами cv находим угол. 
-    '''
-
-    # 3. Get VLM area Coordinates
-    task = 0
-    tasks = ["pointing", "trajectory", "grounding", "positioning", "find_angle", "planing"]
-    pred, img = vlm.send_request(prompt, image, tasks[task], plot=False)
-    if not pred:
-        print("[MAIN] No prediction.")
-        return
-    print("[MAIN]", pred)
-
-    if(img is not None):
-        cam.show_img(img=img, title="Image from vlm")
-
-    data = vlm.safe_parse(pred)
-    coords = data[0]
-    print(f"coords: {coords}, name: {data[-1]}")
-
-    # Try to get a countor finder
-
-    # data = vlm.get_coordinates(pred)
-    # if not data:
-    #     print("[MAIN] Failed to parse JSON.")
-    #     return
-    
-    if(task == 2):
-        # 4. Create Object & Calculate Image Coords
-        target = DetectedObject(
-            name=data[-1],
-            vlm_point=Point2D(x=int(coords[0]), y=int(coords[1])),
-            angle=0,
-        )
-        target.convert_vlm_to_image(cam.width, cam.height)
-        target.create_area(cam.width, cam.height, coords)
-    else:
-        # 4. Create Object & Calculate Image Coords
-        target = DetectedObject(
-            name=data[-1],
-            vlm_point=Point2D(x=int(coords[0]), y=int(coords[1])),
-            angle=0,
-            area=None
-        )
-        target.convert_vlm_to_image(cam.width, cam.height)
-
-
-    countor_img, center, countor = cam.process_image_from_vlm(image, target.area.first_point, target.area.second_point)
-
-    if countor_img is not None:
-        cam.show_img(img=countor_img, title="Countors")
-
-    if center is not None:
-        print(f"[MAIN] Contour center: {center}")
-        if countor_img is not None:
-            # If it's a boolean mask, convert it
-            if isinstance(countor_img, np.ndarray) and countor_img.dtype == bool:
-                countor_img = (countor_img * 255).astype(np.uint8)
-        
-        # Only show if it's actually a valid image (2D or 3D numpy array with numeric dtype)
-        if isinstance(countor_img, np.ndarray) and countor_img.ndim in (2, 3):
-            cam.show_img(img=countor_img)
-        else:
-            print(f"[MAIN] process_image_from_vlm returned invalid type: {type(countor_img)}")
-
-        # # 5. Get Angle (Requires a second camera capture in your logic)
-        # angle, img = vlm.get_object_angle(target, cam)
-        # if target.angle is None:
-        #     return
-        angle = cam.get_rotation_angle(countor)
-
-    print(f"angle = {angle}")
-
-    # angle_data = vlm.safe_parse(angle)
-    # print(angle_data)
-    target.angle = angle
-
-    #get a pickup position coords
-    images = []
-    images.append(image)
-    images.append(countor_img)
-    pred, img = vlm.send_request(f"{prompt} + there are 2 images u must to get point in frames area area", countor_img, tasks[0], plot=True)
-    if not pred:
-        print("[MAIN] No prediction.")
-        return
-    print("[MAIN]", pred)
-
-
-    data = vlm.safe_parse(pred)
-    coords = data[0]
-    print(f"coords: {coords}, name: {data[-1]}")
-
-    # 4. Create Object & Calculate Image Coords
-
-    target.vlm_point.x = coords[0] 
-    target.vlm_point.y = coords[1] 
-    target.convert_vlm_to_image(cam.width, cam.height)
-
-    if(img is not None):
-        cv2.circle(img, (target.image_point.x, target.image_point.y), 5, (0, 0, 255), -1)
-        cam.show_img(img=img, title="Image from vlm pickup coords")
-
-    # 6. Calculate Camera 3D Coords
-    target.camera_point = cam.deproject_pixel(
-        target.image_point.x,
-        target.image_point.y,
-        depth_image,
-        intrin
-    )
-    if target.camera_point is None:
-        print("[MAIN] Failed to deproject 3D point.")
-        return
-
-    # 7. Calculate Robot Position & Move
-    print(f"[MAIN] Camera 3D coords: ({target.camera_point.x:.3f}, {target.camera_point.y:.3f}, {target.camera_point.z:.3f})")
-    
-    move_targets = robot.get_target_positions(target, image)
-    print(move_targets)
-    if move_targets:
-        robot.execute_move(move_targets, type=typ)
 
 if __name__ == "__main__":
-    main(typ='pick')
-    main(typ='put')
+    main()
