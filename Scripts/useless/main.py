@@ -155,7 +155,7 @@ def main():
             # The prompt should tell the model that it's looking at two images side-by-side
             pred, image = send_a_request(prompt, color_img)
             print(type(image))
-            #cv2.imshow("Result", image)
+            cv2.imshow("Result", image)
             cv2.waitKey(0) # Wait for a key press to close the window
             cv2.destroyAllWindows() 
     finally:

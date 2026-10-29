@@ -1,8 +1,10 @@
 import os
 import re
 import ast
+import gc
 import math
 import json
+import tempfile
 from typing import Union
 
 import cv2
@@ -51,7 +53,13 @@ Command: "Show me both wheels of the robot"
 Answer: [[[250, 700, 0.6], [750, 700, 0.6]], "robot"]
 """
 
-prompt_trajectory = """You are a trajectory planning AI. Given the operator's command, generate a sequence of waypoints (x, y, depth) describing the path the robot end-effector should follow to accomplish the task.
+prompt_trajectory = """You are a trajectory planning AI for a robotic arm. Given the operator's command, generate a sequence of 3D waypoints (x, y, depth) describing the path the robot end-effector should follow to accomplish the task.
+
+LIFT/PLACEMENT SEMANTICS (CRITICAL):
+- The FIRST waypoint MUST be at the object to pick up (the LIFT point).
+- The LAST waypoint MUST be at the placement destination (the PLACEMENT point).
+- If the operator's command mentions only ONE object/location (no explicit placement target), the LAST waypoint MUST equal the FIRST waypoint (the object is lifted and placed back at the same location).
+- Middle waypoints (between first and last) describe a safe navigation path and are optional but recommended for non-trivial paths.
 
 COORDINATE SYSTEM:
 - X: 0 = absolute LEFT, 1000 = absolute RIGHT (center ~500).
@@ -59,14 +67,69 @@ COORDINATE SYSTEM:
 - d: depth in meters (float, e.g., 0.5).
 
 === CLICHE (REQUIRED OUTPUT TEMPLATE — MATCH AT LEAST 95%) ===
-[[[x1, y1, d1], [x2, y2, d2], ...], "object_name"]
+[[[x1, y1, d1], [x2, y2, d2], ...]]
 
 OUTPUT RULES (STRICTLY ENFORCED):
-1. Output ONLY a valid Python list containing a list of waypoints and the object name.
-2. NO explanations, NO markdown (no ```), NO quotes around the whole answer.
+1. Output ONLY a valid Python list containing a list of [x, y, d] waypoints.
+2. NO object name, NO explanations, NO markdown (no ```), NO quotes around the whole answer.
 3. x, y are integers in [0, 1000]. d is a float.
-4. At least 2 waypoints are required for a meaningful trajectory.
+4. At least 2 waypoints are required (lift + placement). Middle waypoints are optional.
 5. NEVER use placeholders (x, y, ?, ...) or descriptive substitutes ("top-left corner").
+
+EXAMPLES:
+Command: "Pick up the red cube and place it on the chair"
+Answer: [[400, 700, 0.5], [400, 500, 0.6], [500, 400, 0.7], [600, 300, 0.65]]
+
+Command: "Lift the blue cup"
+Answer: [[520, 600, 0.45], [520, 600, 0.45]]
+"""
+
+# =============================================================================
+# TRAJECTORY REFACTORING PROMPT  (Stage-2 semantic QC for trajectory)
+# =============================================================================
+# Given the operator task + the Stage-1 answer + an image WITH the Stage-1
+# trajectory drawn on it, the model re-examines the trajectory end-to-end
+# and corrects it if end-points don't match the task, the path zigzags, or
+# obstacle avoidance is abrupt. Output is strict coords only — no name.
+
+prompt_trajectory_refactoring = """You are a trajectory verification and correction AI for a robotic arm.
+
+You are given:
+1. The image with the Stage-1 trajectory drawn on it (green line = path, green dot = LIFT start, red dot = PLACEMENT end).
+2. The operator's original task.
+3. The Stage-1 trajectory answer (a list of [x, y, depth] waypoints).
+
+Your job: VERIFY the trajectory is logical and CORRECT it if needed.
+
+=== OPERATOR TASK ===
+{task}
+
+=== STAGE-1 ANSWER (waypoints to verify) ===
+{answer}
+
+=== VERIFICATION CHECKLIST (apply EVERY check) ===
+[ ] The FIRST waypoint is at the object to pick up (matches the operator's task — e.g., if the task says "pick up the cube", the first point MUST be on the cube, not on the table or floor).
+[ ] The LAST waypoint is at the placement target (matches the operator's task — NOT a random point on the table or floor).
+    * If the task says "place on the chair", the LAST point MUST be on the chair — NOT on the table, NOT on the floor.
+    * If the task mentions only ONE object (no explicit placement), the LAST waypoint MUST equal the FIRST (object placed back at the same spot).
+[ ] No wild zigzags or scattered points — the path is reasonably smooth and monotonic.
+[ ] Obstacle avoidance (if any visible obstacle) is smooth — no abrupt direction changes. The path should curve gradually around obstacles, not make sharp 90-degree turns.
+[ ] All coordinates are integers in [0, 1000] and depth is a float.
+
+=== DECISION ===
+- If ALL checks pass: return the SAME trajectory verbatim.
+- If ANY check fails: REWRITE the trajectory to fix the issues.
+  * If end-points are wrong (e.g., placement is on the wrong surface), fix them so they match the operator's task.
+  * If the path has wild zigzags or scattered points, smooth it.
+  * If obstacle avoidance is abrupt, make it gradual and curved.
+  * If only one object is mentioned in the task but the trajectory has different lift/placement points, set the LAST waypoint equal to the FIRST.
+
+=== OUTPUT FORMAT (STRICT) ===
+Return ONLY a Python list of waypoints: [[x, y, d], [x, y, d], ...]
+- NO markdown (no ```), NO explanations, NO object name.
+- NO text before or after the list.
+- x, y MUST be integers in [0, 1000]. d MUST be a float.
+- At least 2 waypoints (lift + placement).
 """
 
 prompt_grounding = """You are a spatial grounding AI. Locate the bounding box of the object described by the operator's command.
@@ -483,7 +546,7 @@ class UnifiedInference:
 
     TASK_CLICHES = {
         "pointing":    '[[x, y, d], "object_name"]   OR   [[[x1,y1,d1],[x2,y2,d2],...], "object_name"]',
-        "trajectory":  '[[[x1,y1,d1],[x2,y2,d2],...], "object_name"]',
+        "trajectory":  '[[[x1,y1,d1],[x2,y2,d2],...]]   (NO object name — only waypoints list)',
         "grounding":   '[[x1, y1, x2, y2], "object_name"]',
         "positioning": '[[[x0,y0,d0],[x1,y1,d1],[x2,y2,d2],[x3,y3,d3],[x4,y4,d4]], "object_name"]',
         "find_angle":  '[[angle_float_radians, "object_name"]]',
@@ -492,10 +555,12 @@ class UnifiedInference:
     }
 
     # Tasks that should NOT go through the generic Stage-2 QC pass:
-    #   - "general" has no CLICHE to validate against.
-    #   - "planing" HAS its own dedicated validation prompt (prompt_planing_validation),
-    #     so it IS validated, just via a different code path.
-    TASKS_WITHOUT_GENERIC_QC = ("general",)
+    #   - "general"    has no CLICHE to validate against.
+    #   - "planing"    HAS its own dedicated validation prompt (prompt_planing_validation),
+    #                  so it IS validated, just via a different code path.
+    #   - "trajectory" HAS its own dedicated refactoring prompt (prompt_trajectory_refactoring)
+    #                  that re-runs the model on the annotated image + Stage-1 answer.
+    TASKS_WITHOUT_GENERIC_QC = ("general", "trajectory")
 
     # Valid plan step types — used by _looks_valid() for the planing task.
     VALID_PLAN_TYPES = ("general", "pointing", "trajectory", "grounding")
@@ -571,7 +636,7 @@ class UnifiedInference:
         try:
             generated_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=768,
+                max_new_tokens=1000,
                 do_sample=do_sample,
                 temperature=temperature,
             )
@@ -602,6 +667,55 @@ class UnifiedInference:
             s = re.sub(r"^```\w*\n?", "", s)
             s = re.sub(r"\n?```$", "", s)
         return s.strip()
+
+    # ------------------------------------------------------------------
+    # GPU memory cleanup (between Stage 1 and Stage 2 of trajectory flow,
+    # to avoid OOM when re-running the model on the annotated image).
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _cleanup_gpu(label: str = ""):
+        """gc + CUDA synchronize + empty_cache + ipc_collect.
+
+        Mirrors VLMProcessor._cleanup_gpu (vlm.py) — kept here so that
+        inference-time cleanups don't depend on the outer wrapper.
+        """
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        if label:
+            allocated = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0.0
+            reserved = torch.cuda.memory_reserved() / 1024**3 if torch.cuda.is_available() else 0.0
+            print(f"[MEM {label}] alloc={allocated:.2f}G  reserved={reserved:.2f}G")
+
+    # ------------------------------------------------------------------
+    # Trajectory helpers (used by the two-stage trajectory flow)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_trajectory_points(text: str):
+        """Extract [x, y, d] waypoints from a trajectory answer text.
+
+        Returns a list of (int, int, float) tuples, or [] if none found.
+        """
+        if not text:
+            return []
+        pattern = r'(\d+),\s*(\d+),\s*([+-]?\d+(?:\.\d+)?)'
+        matches = re.findall(pattern, text)
+        return [(int(x), int(y), float(d)) for x, y, d in matches]
+
+    @staticmethod
+    def _save_temp_image(image_np, prefix: str = "traj_stage") -> str:
+        """Save a numpy image to a temp .jpg file and return the path.
+
+        The caller is responsible for os.remove() when done.
+        """
+        tf = tempfile.NamedTemporaryFile(prefix=f"{prefix}_", suffix=".jpg",
+                                          delete=False)
+        temp_path = tf.name
+        tf.close()
+        cv2.imwrite(temp_path, image_np)
+        return temp_path
 
     def _looks_valid(self, text: str, task: str) -> bool:
         """Cheap AST-based sanity check whether the output matches the CLICHE.
@@ -639,6 +753,18 @@ class UnifiedInference:
                     return False
             return True
 
+        # ---- trajectory-specific check: NO object name, just a flat list of [x,y,d] ----
+        # CLICHE: [[x1,y1,d1],[x2,y2,d2],...]
+        if task == "trajectory":
+            if not isinstance(val, list) or len(val) < 2:
+                return False
+            for point in val:
+                if not isinstance(point, (list, tuple)) or len(point) != 3:
+                    return False
+                if not all(isinstance(v, (int, float)) for v in point):
+                    return False
+            return True
+
         # ---- generic CLICHE-based check for the other tasks ----
         if not isinstance(val, list) or len(val) != 2:
             return False
@@ -654,7 +780,7 @@ class UnifiedInference:
         if task == "positioning":
             return (isinstance(payload, list) and len(payload) == 5
                     and all(isinstance(p, list) and len(p) == 3 for p in payload))
-        # pointing / trajectory
+        # pointing (trajectory is handled above)
         if not isinstance(payload, list):
             return False
         if payload and isinstance(payload[0], (int, float)):
@@ -689,6 +815,16 @@ class UnifiedInference:
           - _looks_valid() does a structural check that each step is
             [description_str, valid_type_str].
 
+        For task == "trajectory":
+          - Stage 1 builds the trajectory with prompt_trajectory + the user task.
+            Output CLICHE: [[x,y,d], ...] (NO object name).
+          - Stage 2 runs prompt_trajectory_refactoring on the image WITH the
+            Stage-1 trajectory drawn + the Stage-1 answer text. The model
+            verifies end-points match the operator task, no zigzags, smooth
+            obstacle avoidance, and rewrites if needed.
+          - One refactoring pass — NO retries (keeps the system light).
+          - GPU cleanup runs between Stage 1 and Stage 2, and after Stage 2.
+
         Args:
             text (str): The input text prompt.
             image (Union[list,str]): The input image(s) — list of paths or single path.
@@ -705,8 +841,9 @@ class UnifiedInference:
 
         assert task in self.SUPPORTED_TASKS, \
             f"Invalid task type: {task}. Supported tasks are {self.SUPPORTED_TASKS}."
-        assert task == "general" or len(image) == 1, \
-            "Pointing/grounding/trajectory/positioning/find_angle/planing tasks require exactly one image."
+        if task != "general" and len(image) > 1:
+            print(f"[WARN] task='{task}' with {len(image)} images — "
+                f"coordinates will be relative to the LAST image unless you say otherwise.")
 
         # -------- Build Stage-1 prompt --------
         if task == "general":
@@ -736,6 +873,21 @@ class UnifiedInference:
         except RuntimeError as e:
             print(f"[FATAL] Stage 1 generation failed: {e}")
             raise
+
+        # -------- Trajectory: dedicated two-stage refactoring flow --------
+        # For task == "trajectory" we DO NOT use the generic Stage-2 QC.
+        # Instead: Stage 1 draws its trajectory on the image, then Stage 2
+        # re-runs the model on the annotated image + the Stage-1 answer,
+        # verifying end-points match the task and the path is smooth.
+        if task == "trajectory":
+            return self._run_trajectory_refactoring(
+                text=text,
+                image=image,
+                stage1_answer=raw_answer,
+                plot=plot,
+                do_sample=do_sample,
+                temperature=temperature,
+            )
 
         # -------- Pass 2: QC + retries --------
         # Planing IS validated (with its own plan-specific QC prompt).
@@ -856,6 +1008,91 @@ class UnifiedInference:
 
         print("[INFERENSE] end of the function")
         return answer_text, None
+
+    # ------------------------------------------------------------------
+    # Trajectory two-stage refactoring flow (separate from generic QC)
+    # ------------------------------------------------------------------
+    def _run_trajectory_refactoring(self, text, image, stage1_answer,
+                                   plot, do_sample, temperature):
+        """Stage 2 for trajectory: feed the annotated image + Stage-1 answer
+        back into the model and ask it to verify/correct the trajectory.
+
+        One pass, no retries (per the operator's spec — keep it light).
+
+        Returns (final_answer_text, final_annotated_image_or_None).
+        """
+        # 1. Cleanup GPU between Stage 1 and Stage 2.
+        self._cleanup_gpu(label="between:trajectory_stages")
+
+        # 2. Load original image (from path).
+        original_image = cv2.imread(image[0]) if isinstance(image[0], str) else image[0].copy()
+        if original_image is None:
+            print("[TRAJECTORY] Could not load original image — skipping Stage 2.")
+            return stage1_answer, None
+
+        # 3. Draw Stage-1 trajectory on a COPY of the image.
+        stage1_points = self._extract_trajectory_points(stage1_answer)
+        stage1_annotated = None
+        if stage1_points:
+            stage1_annotated = self.draw_on_image(
+                image[0],
+                trajectories=[stage1_points],
+                output_path=None,  # in-memory only
+            )
+        if stage1_annotated is None:
+            # Couldn't extract/draw — use the original image as Stage-2 input.
+            print("[TRAJECTORY] No Stage-1 points extracted — using original image for Stage 2.")
+            stage1_annotated = original_image.copy()
+
+        # 4. Save the annotated image to a temp file for Stage-2 input.
+        stage2_image_path = self._save_temp_image(stage1_annotated, prefix="traj_stage1")
+
+        try:
+            # 5. Build the Stage-2 refactoring prompt.
+            refactor_prompt = prompt_trajectory_refactoring.format(
+                task=text,
+                answer=stage1_answer,
+            )
+            print(f"\n{'='*20} STAGE 2 — TRAJECTORY REFACTORING {'='*20}\n"
+                  f"{refactor_prompt}\n{'='*53}\n")
+
+            # 6. Stage 2: run model on the annotated image + Stage-1 answer.
+            try:
+                final_answer = self._generate(
+                    refactor_prompt, [stage2_image_path], do_sample, temperature
+                )
+                print(f"\n[Stage 2 refactored trajectory]\n{final_answer}\n")
+            except RuntimeError as e:
+                print(f"[WARN] Stage 2 refactoring failed ({e}). Falling back to Stage 1.")
+                final_answer = stage1_answer
+
+            # 7. Cleanup GPU after Stage 2.
+            self._cleanup_gpu(label="after:trajectory_stage2")
+
+            # 8. Lightweight validity check — NO retries (per spec).
+            if not self._looks_valid(final_answer, "trajectory"):
+                print(f"[QC] Stage-2 output doesn't pass _looks_valid — keeping it anyway (no retry).")
+
+            # 9. Optional: draw the FINAL trajectory on a clean copy of the
+            # original image (not on the Stage-1 annotated one).
+            final_image = None
+            if plot:
+                final_points = self._extract_trajectory_points(final_answer)
+                if final_points:
+                    final_image = self.draw_on_image(
+                        image[0],
+                        trajectories=[final_points],
+                        output_path=None,
+                    )
+
+            return final_answer, final_image
+        finally:
+            # Always remove the temp file, even if Stage 2 raised.
+            if os.path.exists(stage2_image_path):
+                try:
+                    os.remove(stage2_image_path)
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------ drawing
 
