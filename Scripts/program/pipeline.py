@@ -148,18 +148,23 @@ class PickAndPlacePipeline:
         print(f"[PIPELINE] Lift angle (30x30 contour): {lift_angle_deg}°")
 
         # 6. Конвертация всех пикселей → 3D координаты камеры.
-        #    Используем уже вычисленные пиксели (lift_pixel, middle_pixels,
-        #    placement_pixel) — НЕ пересчитываем, чтобы не было расхождений.
+        #    ВСЕ way-ы через depth_image (lift, middles, placement) — как просил.
+        #    z middles потом принудительно станет 0.4 в robot.move_through_trajectory.
         all_pixels = [lift_pixel] + middle_pixels + [placement_pixel]
         camera_points = []
-        print(f"[PIPELINE] ---- PIXEL → 3D CAMERA ----")
-        for wp, pix in zip(waypoints, all_pixels):
+        n_wp = len(waypoints)
+        print(f"[PIPELINE] ---- PIXEL → 3D CAMERA (depth_image) ----")
+        for i, (wp, pix) in enumerate(zip(waypoints, all_pixels)):
+            is_lift = (i == 0)
+            is_placement = (i == n_wp - 1)
             pt3d = self.cam.deproject_pixel(pix.x, pix.y, depth_image, intrin)
             if pt3d is None:
                 print(f"[PIPELINE] Failed to deproject pixel ({pix.x}, {pix.y}) "
                       f"(VLM {wp[0]}, {wp[1]}) — skipping")
                 continue
-            print(f"[PIPELINE] VLM=({wp[0]}, {wp[1]})  pixel=({pix.x}, {pix.y})  "
+            label = "LIFT" if is_lift else ("PLACE" if is_placement else f"MID[{i}]")
+            print(f"[PIPELINE] {label:5s} VLM=({wp[0]}, {wp[1]})  "
+                  f"pixel=({pix.x}, {pix.y})  "
                   f"3D=({pt3d.x:.3f}, {pt3d.y:.3f}, {pt3d.z:.3f}) m")
             camera_points.append(pt3d)
 
