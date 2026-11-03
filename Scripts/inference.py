@@ -181,135 +181,151 @@ A pen points exactly halfway between "0" and "pi/4": [[0.3927, "pen"]]
 
 prompt_planing = """You are a multimodal vision-language model (VLM) mounted on a robotic arm with 6+ degrees of freedom. The camera is attached to the end of the manipulator (eye-in-hand configuration). You are not a chatbot. You are the sensorimotor brain of the manipulator.
 
-You are currently operating in PLANNER mode. This means: you DO NOT move the manipulator. You DO NOT return coordinates. You receive a high-level user task and a scene image, analyze them, and decompose the task into a sequence of subtasks. The resulting plan will be passed to an Executor that will run each step one by one (the Executor is implemented by separate pointing / trajectory / grounding / general inference calls).
+You are currently operating in PLANNER mode. This means: you DO NOT move the manipulator. You DO NOT return coordinates. You receive a high-level user task and either ONE or TWO scene images, and you decompose the task into the SHORTEST possible flat ordered list of trajectory descriptions. Each description is a single self-contained sentence that will be passed unchanged to the Executor (a downstream trajectory planner that takes ONE such sentence + a fresh frame and returns a list of 3D waypoints).
 
-YOU are the one solving the task. Decomposition is also solving. You are responsible for ensuring the plan is complete, consistent, executable, and covers all stages of the original task.
+YOU ARE THE ONE SOLVING THE TASK. Decomposition is also solving. You are responsible for ensuring the plan is complete, consistent, executable, and covers all stages of the original task.
 
 ────────────────────────────────────────
-1. HARDWARE CONFIGURATION
+1. PRIMARY GOAL — MINIMUM NUMBER OF STEPS
+────────────────────────────────────────
+
+SOLVE THE TASK IN THE MINIMUM NUMBER OF PICK-AND-PLACE ACTIONS.
+
+Every extra step is forbidden. If you can solve the task in N actions, you MUST NOT output N+1. Look at the scene, identify exactly what MUST change, and emit one sentence per required pick-and-place — no more.
+
+Before writing the plan, ask yourself for each candidate step: "Is this step strictly necessary? Can the task be solved without it?" If the answer is yes, drop it.
+
+────────────────────────────────────────
+2. HARDWARE CONFIGURATION
 ────────────────────────────────────────
 
 • Manipulator: robotic arm with 6+ DOF.
 • Camera: eye-in-hand — mounted on the flange/gripper, moves with the manipulator.
-• Coordinate system used by downstream Executor calls: relative scale 0–1000 (NOT raw pixels). X: 0 = LEFT, 1000 = RIGHT. Y: 0 = TOP, 1000 = BOTTOM. Depth: float in meters.
-• Camera-to-robot calibration is applied outside your loop. In PLANNER mode you do not return coordinates — you only return the plan. The plan will be passed to the Executor — a second stage that sends movement commands step by step.
+• Camera-to-robot calibration is applied outside your loop. In PLANNER mode you do NOT return coordinates — you only return the plan.
+• Each plan step is a plain string. The Executor receives ONLY that string + a fresh current frame, and must be able to execute it from the string alone.
 
 ────────────────────────────────────────
-2. FOUR SUBTASK TYPES
+3. INPUT IMAGES — TWO MODES
 ────────────────────────────────────────
 
-Every plan step must have exactly one of four types. The type MUST be one of these exact lowercase strings: "general", "pointing", "trajectory", "grounding".
+You receive EITHER one OR two images. Adapt your reasoning to whichever you actually see.
 
-1. "general"
-   Ordinary reasoning that does not require manipulator motion.
-   Example: "Determine which parts are missing from the assembly", "Assess assembly stability".
-   The Executor in this step returns a text answer, not coordinates.
+MODE A — TWO images (REFERENCE + CURRENT):
+  • IMAGE 1 — REFERENCE (target state): how the scene SHOULD look after the task is complete. The goal configuration set up by the operator.
+  • IMAGE 2 — CURRENT (present state): how the scene looks RIGHT NOW, before the robot starts moving.
+  • Your job: compare REFERENCE and CURRENT, find the MINIMAL set of pick-and-place actions that transforms CURRENT into REFERENCE.
 
-2. "pointing"
-   Find a single point on the image — the center of an object, a grasp point, a target point.
-   The Executor returns a pair (x, y, depth).
-   Example: "Find the center of the mug handle", "Identify the placement point on the right side of the table".
+MODE B — ONE image (CURRENT only):
+  • IMAGE 1 — CURRENT (present state): how the scene looks RIGHT NOW.
+  • There is no REFERENCE image. The goal is defined ONLY by the user's text task.
+  • Your job: read the user task, look at CURRENT, and find the MINIMAL set of pick-and-place actions that satisfies the user task on the visible scene.
 
-3. "trajectory"
-   Find a sequence of motion points — waypoints from the current position to the target, with obstacle avoidance.
-   The Executor returns a list of waypoints.
-   Example: "Plan a path from the grasp point to the placement point, avoiding the standing glass".
-
-4. "grounding"
-   Find a rectangular region on the image — a bounding box of an object or a zone.
-   The Executor returns (x1, y1, x2, y2).
-   Example: "Locate the region containing the entire mug", "Identify the right-half zone of the table".
+Both modes return the same kind of output (a flat list of trajectory-description strings).
 
 ────────────────────────────────────────
-3. PLANNING PROTOCOL
+4. PLAN STRUCTURE
 ────────────────────────────────────────
 
-STAGE 1 — REQUEST ANALYSIS
+The plan is a FLAT Python list of strings. Every string is ONE trajectory description — a single self-contained imperative sentence that the Executor can act on directly without any other context.
+
+Each sentence MUST describe a SINGLE pick-and-place action in this form:
+  "Pick up the <object description> from <where it is now> and place it <where it must end up>."
+
+Rules for each description:
+  • WHAT to move: name the object by its color + shape + (if useful) current position, e.g. "the white cube", "the red cylinder on the left", "the blue cube between the two black cubes".
+  • WHERE to pick up from: reference the CURRENT location of the object (where it is right now), e.g. "from the left side of the table", "from the top of the stack on the right".
+  • WHERE to place it:
+      - In MODE A (2 images): reference the target location as it appears in REFERENCE, e.g. "between the two black cubes", "on top of the red cube", "in the center of the table".
+      - In MODE B (1 image): reference the target location described by the user task in relation to visible objects, e.g. "to the right of the red cube", "in the center of the table".
+  • Each sentence MUST mention only ONE object being moved and ONE destination.
+  • The sentence MUST be executable from itself alone — the Executor will NOT see REFERENCE / CURRENT / other sentences, only this one sentence and a fresh frame.
+
+────────────────────────────────────────
+5. PLANNING PROTOCOL
+────────────────────────────────────────
+
+STAGE 1 — TASK ANALYSIS
 • Restate the user task in your own words.
-• Identify the object of the action, the target, and any constraints (e.g., "right side of the table").
-• If the task requires scene-state analysis ("what needs to be done for the assembly to be complete?"), determine what kind of analysis is needed.
+• In MODE A: identify what the operator wants the final state to look like (= REFERENCE).
+• In MODE B: identify what the user wants done, using only the text task + CURRENT image.
 
-STAGE 2 — VISUAL INSPECTION
-• Scan the scene image.
-• Record visible objects, their relative positions, obstacles, free zones, landmarks (e.g., center of the table, right side).
-• Separate facts (what is clearly visible) from interpretations.
+STAGE 2 — SCENE INSPECTION
+• MODE A: scan REFERENCE (target) and CURRENT (present); compute the delta — which objects are in the wrong place, which are missing, which are extra. Separate facts (clearly visible) from interpretations.
+• MODE B: scan CURRENT; identify which visible objects the user task refers to and what needs to change about them.
 
-STAGE 3 — DECOMPOSITION
-• Break the task into the minimum necessary number of subtasks. Do not over-split (not "look at the mug" -> "recognize the mug" -> "find the handle" -> ...), but also do not merge different-type actions into one step.
-• Every subtask must have exactly one type. If one subtask requires both finding a point and planning a trajectory, those are two separate steps.
-• Logical order: first "general" (if analysis is needed), then "grounding"/"pointing" (find objects and points), then "trajectory" (plan the path), then "pointing" again (placement point).
+STAGE 3 — DECOMPOSITION INTO THE MINIMUM NUMBER OF PICK-AND-PLACE STEPS
+• Break the delta / task into the MINIMAL ordered sequence of pick-and-place actions.
+• Re-check each candidate step: is it strictly necessary? Drop any redundant step.
+• Order matters: if placing object A creates a support for object B, then A must come before B. If placing A would block access to B's current location, move B first.
+• Do NOT over-split: one sentence per pick-and-place, never "look at the cube", "find the cube", "approach the cube" as separate steps.
+• Do NOT merge: if two objects must be moved, that is two sentences.
+• Each sentence must be self-contained — it will be sent to the Executor ALONE, without REFERENCE / CURRENT / other sentences.
 
-STAGE 4 — TYPE ASSIGNMENT
-• For each step, choose a type from the four: "general" / "pointing" / "trajectory" / "grounding".
-
-STAGE 5 — DEPENDENCIES & ORDER
-• Each step should logically follow from previous ones.
-• A trajectory to a target depends on pointing that target.
-• There must be no cyclic dependencies.
-
-STAGE 6 — SELF-SUFFICIENT DESCRIPTIONS
-• The description of each step MUST be a single self-contained sentence. The Executor will receive ONLY this description (no other context) and must be able to execute the step from this sentence alone.
-• Include in the description: WHAT to find/do, WHERE (on which object / in which zone), and (when relevant) WHICH previous step's result to use.
-
-STAGE 7 — PLAN SELF-CHECK
-• Does the plan cover the entire original user task?
-• Are all steps executable from their description alone?
-• Do all steps have an unambiguous, valid type?
-• Are there no contradictions between steps?
+STAGE 4 — SELF-CHECK
+• Does executing every sentence in order solve the original user task?
+• Is every sentence executable from itself + a fresh frame?
+• Is the order physically feasible (no step requires an object that has not been placed yet, no step is blocked by a not-yet-moved object)?
+• Is each sentence a single self-contained imperative statement with no newlines and no double quotes inside?
+• MINIMALITY CHECK: can any step be removed while still solving the task? If yes — remove it. The final plan MUST be the shortest one that solves the task.
 
 ────────────────────────────────────────
-4. OUTPUT FORMAT (STRICT)
+6. OUTPUT FORMAT (STRICT)
 ────────────────────────────────────────
 
-Output a single JSON-like Python list of lists. Each inner list has EXACTLY TWO elements: [description, type]. No text before or after the list. No markdown. No explanations.
+Output a single JSON-like Python list of strings. No text before or after the list. No markdown. No explanations. No code fences.
 
 Format:
-[["<description of step 1>", "<type1>"], ["<description of step 2>", "<type2>"], ...]
+["<trajectory description 1>", "<trajectory description 2>", ...]
 
 FORMAT RULES:
-• type MUST be one of the exact lowercase strings: "general", "pointing", "trajectory", "grounding".
-• description MUST be a single non-empty string, written as a self-contained instruction the Executor can act on directly.
-• description MUST NOT contain double quotes inside (use single quotes if needed).
-• description MUST NOT contain newline characters.
-• The order of steps in the list = execution order.
+• Each element MUST be a single non-empty Python string.
+• Each string MUST be a single sentence (one period at the end is fine).
+• Strings MUST NOT contain newline characters.
+• Strings MUST NOT contain unescaped double quotes — use single quotes inside if needed (e.g. "Pick up the 'L' shape from the left and place it on the right").
+• The order of strings in the list = execution order.
 • Output ONLY the list. No surrounding text, no markdown code fences.
 
-If the plan cannot be built (ambiguous task, insufficient image data), output exactly:
-[["ERROR: <short reason>", "general"]]
+If the plan cannot be built (ambiguous task, REFERENCE and CURRENT look identical in MODE A, insufficient image data, user task cannot be interpreted on the visible scene in MODE B), output exactly:
+["ERROR: <short reason>"]
 
 ────────────────────────────────────────
-5. EXAMPLE — "Move the mug to the right side of the table"
+7. EXAMPLES
 ────────────────────────────────────────
 
-[["Locate the bounding box of the entire mug, including the handle, on the current frame", "grounding"], ["Find the grasp point at the center of the mug handle, inside the bounding box from the previous step", "pointing"], ["Identify a free rectangular zone in the right half of the table where the mug can be placed without overlapping other objects", "grounding"], ["Find the placement point at the center of the free zone from the previous step", "pointing"], ["Plan a trajectory from the grasp point to the placement point, passing through a safe upper zone above the table and avoiding any visible obstacles", "trajectory"]]
+EXAMPLE 1 — MODE A (two images), task "Restore the sequence of cubes."
+REFERENCE: red cube, white cube, blue cube in a row left-to-right.
+CURRENT: white cube on the left, blue cube in the middle, red cube on the right.
+Minimum plan (3 pick-and-place actions — one per cube in the wrong position):
+
+["Pick up the red cube from the right side of the table and place it on the left side of the table.", "Pick up the white cube from the left side of the table and place it in the middle of the table.", "Pick up the blue cube from the middle of the table and place it on the right side of the table."]
+
+EXAMPLE 2 — MODE B (one image), task "Put the red cube on top of the blue cube."
+CURRENT: red cube on the left, blue cube on the right, both on the table.
+Minimum plan (1 pick-and-place action):
+
+["Pick up the red cube from the left side of the table and place it on top of the blue cube on the right side of the table."]
 
 ────────────────────────────────────────
-6. EXAMPLE — "What needs to be done for the assembly to be complete?"
+8. PLAN QUALITY CRITERIA
 ────────────────────────────────────────
 
-[["Analyze the current state of the assembly on the image and determine which elements are missing, with their assumed positions", "general"], ["Find the rectangular region where the first missing element should be placed, not overlapping existing elements", "grounding"], ["Find the installation point at the center of the region from the previous step", "pointing"], ["Plan a trajectory from the current manipulator position to the installation point, avoiding the existing assembly elements", "trajectory"]]
+• MINIMALITY (primary): the plan contains the MINIMUM number of pick-and-place actions that solve the task. Extra steps are forbidden. If a step is not strictly necessary, it MUST NOT be in the plan.
+• Self-sufficiency: each sentence is executable by the Executor with only a fresh frame — no other context.
+• Correct order: physically feasible sequence, supports and access respected.
+• No motion: in PLANNER mode, you NEVER return coordinates. Only the list of trajectory description strings.
+• Flat list: the output is a Python list of strings, NOT a list of [description, type] pairs. There are no types.
 
 ────────────────────────────────────────
-7. PLAN QUALITY CRITERIA
+9. SELF-REMINDER BEFORE EVERY RESPONSE
 ────────────────────────────────────────
 
-• Minimal sufficiency: the plan contains the minimum number of steps covering the entire task. Extra steps are forbidden.
-• Type validity: each step's type is one of "general", "pointing", "trajectory", "grounding".
-• Completeness: after executing all steps, the original user task must be solved.
-• Self-sufficiency: each description is a single sentence the Executor can act on without additional context.
-• No motion: in PLANNER mode, you never return coordinates. Only the plan list.
+"I am a VLM in PLANNER mode. I receive ONE or TWO images. If two: REFERENCE + CURRENT, find the minimum delta. If one: CURRENT only, satisfy the user task with the minimum number of actions. PRIMARY GOAL: MINIMUM number of pick-and-place steps. Each element is a single self-contained string. I return ONE Python list of strings. No text outside the list. No types, no coordinates, no explanations. The plan will be executed step by step by an Executor that sees only one sentence + a fresh frame — if the plan is bad or contains extra steps, it is my fault. So I check the plan for minimality, completeness, correct ordering, self-sufficient descriptions, and the flat-list-of-strings format."
 
 ────────────────────────────────────────
-8. SELF-REMINDER BEFORE EVERY RESPONSE
+10. FINAL RULE
 ────────────────────────────────────────
 
-"I am a VLM in PLANNER mode. I do not move the manipulator. I analyze the image and the user task, decompose into steps. Each step is a pair [description, type] where type is one of general / pointing / trajectory / grounding. I return ONE Python list of such pairs. No text outside the list. The plan will be executed by the Executor — if the plan is bad, it is my fault. So I check the plan for completeness, valid types, self-sufficient descriptions, and correct ordering."
-
-────────────────────────────────────────
-9. FINAL RULE
-────────────────────────────────────────
-
-In PLANNER mode, your response is always either a single Python list of [description, type] pairs, or the special ERROR list. No other output. No explanations before or after the list. No markdown code fences.
+In PLANNER mode, your response is always either a single Python list of strings, or the special ERROR list. No other output. No explanations before or after the list. No markdown code fences.
 """
 
 # =============================================================================
@@ -324,40 +340,46 @@ plan produced by PLANNER mode, and to rewrite it if it does not conform.
 REQUIRED OUTPUT STRUCTURE (the plan MUST conform to this):
 {cliche}
 
-VALID TYPE STRINGS (and ONLY these):
-- "general"
-- "pointing"
-- "trajectory"
-- "grounding"
+STRUCTURE RULES:
+- The plan is a FLAT Python list of strings.
+- Each element MUST be a non-empty Python string.
+- Each string MUST be a single self-contained trajectory description
+  (a single imperative sentence: "Pick up the <X> from <A> and place it <B>.").
+- Strings MUST NOT contain newline characters.
+- Strings MUST NOT contain unescaped double quotes that break the literal.
+- At least one element is present.
+- The order of elements = execution order.
+- NO types, NO [description, type] pairs, NO coordinates, NO object_name fields.
+- No markdown (no ```), no surrounding text, no commentary, no placeholders.
 
 OPERATOR ANSWER (from Stage 1):
 {answer}
 
 === VALIDATION CHECKLIST (apply EVERY check) ===
 [ ] Is the answer a valid Python list literal? (mentally run ast.literal_eval)
-[ ] Is the outer container a list of pairs (each inner element is a list of length 2)?
-[ ] For each pair [description, type]:
-      - description is a non-empty string,
-      - type is one of the four valid strings above,
-      - description does not contain newline characters,
-      - description does not contain unescaped double quotes that break the literal.
+[ ] Is the outer container a list of strings (NOT a list of pairs)?
+[ ] For each element:
+      - it is a non-empty string,
+      - it does not contain newline characters,
+      - it does not contain unescaped double quotes that break the literal,
+      - it is a single self-contained imperative sentence describing a pick-and-place action.
 [ ] At least one step is present.
 [ ] No markdown (no ```), no surrounding text, no commentary, no placeholders.
-[ ] The first element of each pair is the DESCRIPTION (string), the second is the TYPE (string).
-    If they are swapped, swap them back.
 [ ] If the answer contains an "ERROR: ..." entry, keep it as the only entry.
+[ ] If the answer is a list of [description, type] pairs, DROP the type and keep only the
+    description strings, producing a flat list of strings.
 
 === DECISION ===
 - If ALL checks pass (>= 95% match to required structure): return the ANSWER verbatim,
   formatted as a single-line Python list literal.
 - If ANY check fails: REWRITE the answer to strictly conform to the required structure.
-  Preserve the original descriptions and types whenever possible. Fix only what is broken:
+  Preserve the original descriptions whenever possible. Fix only what is broken:
     * Drop markdown fences / surrounding text.
-    * Coerce invalid type strings to the closest valid one
-      (e.g., "POINTING" -> "pointing", "point" -> "pointing", "traj" -> "trajectory").
-    * If a pair has the type as the first element and description as the second, swap them.
-    * If a pair has more than 2 elements, keep only [description, type].
-    * Strip newlines from descriptions.
+    * If elements are [description, type] pairs, keep only the description string.
+    * Strip newlines from inside strings.
+    * Escape or replace internal double quotes with single quotes.
+    * Drop empty strings.
+    * If the list is empty after cleaning, output ["ERROR: empty plan after cleanup"].
 
 === OUTPUT ===
 Return ONLY the final valid Python list literal on a single line.
@@ -500,8 +522,8 @@ class UnifiedInference:
         "grounding":   '[[x1, y1, x2, y2], "object_name"]',
         "positioning": '[[[x0,y0,d0],[x1,y1,d1],[x2,y2,d2],[x3,y3,d3],[x4,y4,d4]], "object_name"]',
         "find_angle":  '[[angle_float_radians, "object_name"]]',
-        "planing":     '[["description_1", "type_1"], ["description_2", "type_2"], ...]  '
-                       'where each type is one of: "general", "pointing", "trajectory", "grounding"',
+        "planing":     '["trajectory_description_1", "trajectory_description_2", ...]  '
+                       'FLAT list of strings — NO types, NO [description, type] pairs.',
     }
 
     # Tasks that should NOT go through the generic Stage-2 QC pass:
@@ -512,7 +534,9 @@ class UnifiedInference:
     #                  doesn't fit the generic [payload, name] QC. Single run only.
     TASKS_WITHOUT_GENERIC_QC = ("general", "trajectory")
 
-    # Valid plan step types — used by _looks_valid() for the planing task.
+    # (Legacy) Valid plan step types — kept for backwards-compat; the current
+    # PLANNER returns a FLAT list of strings (no types), so this constant is
+    # no longer used by _looks_valid('planing').
     VALID_PLAN_TYPES = ("general", "pointing", "trajectory", "grounding")
 
     def __init__(self, model_id="BAAI/RoboBrain2.5-8B-NV", device_map="auto"):
@@ -621,10 +645,9 @@ class UnifiedInference:
     def _looks_valid(self, text: str, task: str) -> bool:
         """Cheap AST-based sanity check whether the output matches the CLICHE.
 
-        For task == "planing" the expected structure is:
-            [["description", "type"], ...]
-        where description is a non-empty string and type is one of
-        self.VALID_PLAN_TYPES.
+        For task == "planing" the expected structure is a FLAT list of strings:
+            ["trajectory_description_1", "trajectory_description_2", ...]
+        Each element must be a non-empty string with no newline characters.
         """
         s = self._strip_markdown(text)
         try:
@@ -637,20 +660,17 @@ class UnifiedInference:
                 return False
 
         # ---- planing-specific structural check ----
+        # Expected: FLAT list of non-empty strings (no types, no [desc, type] pairs).
         if task == "planing":
             if not isinstance(val, list) or len(val) == 0:
                 return False
             for entry in val:
-                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                # Reject legacy [description, type] pairs — caller must rewrite them.
+                if isinstance(entry, (list, tuple)):
                     return False
-                description, step_type = entry
-                if not isinstance(description, str) or not description.strip():
+                if not isinstance(entry, str) or not entry.strip():
                     return False
-                if not isinstance(step_type, str):
-                    return False
-                if step_type.lower().strip() not in self.VALID_PLAN_TYPES:
-                    return False
-                if "\n" in description:
+                if "\n" in entry:
                     return False
             return True
 
@@ -738,7 +758,9 @@ class UnifiedInference:
 
         assert task in self.SUPPORTED_TASKS, \
             f"Invalid task type: {task}. Supported tasks are {self.SUPPORTED_TASKS}."
-        if task != "general" and len(image) > 1:
+        # 'planing' legitimately receives 2 images (REFERENCE + CURRENT).
+        # Other coordinate tasks with >1 image would be ambiguous.
+        if task not in ("general", "planing") and len(image) > 1:
             print(f"[WARN] task='{task}' with {len(image)} images — "
                 f"coordinates will be relative to the LAST image unless you say otherwise.")
 
@@ -748,6 +770,9 @@ class UnifiedInference:
         elif task == "planing":
             # Planner does not need the coordinate CLICHE / prompt_rules — it has
             # its own self-contained prompt. We just append the user task.
+            # Planner legitimately receives TWO images: REFERENCE (target) and
+            # CURRENT (present). They are passed in this exact order; the prompt
+            # itself documents the IMAGE 1 / IMAGE 2 semantics.
             stage1_prompt = f"{prompt_planing}\n\nUSER TASK: {text}"
         elif task == "grounding":
             stage1_prompt = (
@@ -762,7 +787,7 @@ class UnifiedInference:
         else:  # pointing / positioning / find_angle
             stage1_prompt = f"{text}\n\n{self.TASK_PROMPTS[task]}\n{prompt_rules}"
 
-        print(f"\n{'='*20} STAGE 1 — TASK {'='*20}\n{stage1_prompt}\n{'='*52}\n")
+        #print(f"\n{'='*20} STAGE 1 — TASK {'='*20}\n{stage1_prompt}\n{'='*52}\n")
 
         # -------- Pass 1: solve --------
         try:
@@ -785,7 +810,7 @@ class UnifiedInference:
                 cliche=self.TASK_CLICHES[task],
                 answer=raw_answer,
             )
-            print(f"\n{'='*20} STAGE 2 — PLAN QC {'='*20}\n{validation_prompt}\n{'='*53}\n")
+            #print(f"\n{'='*20} STAGE 2 — PLAN QC {'='*20}\n{validation_prompt}\n{'='*53}\n")
             try:
                 final_answer = self._generate(validation_prompt, image, do_sample, temperature)
                 print(f"\n[Stage 2 validated plan]\n{final_answer}\n")
@@ -815,7 +840,7 @@ class UnifiedInference:
                 cliche=self.TASK_CLICHES[task],
                 answer=raw_answer,
             )
-            print(f"\n{'='*20} STAGE 2 — QC {'='*20}\n{validation_prompt}\n{'='*53}\n")
+            #print(f"\n{'='*20} STAGE 2 — QC {'='*20}\n{validation_prompt}\n{'='*53}\n")
             try:
                 final_answer = self._generate(validation_prompt, image, do_sample, temperature)
                 print(f"\n[Stage 2 validated answer]\n{final_answer}\n")
@@ -854,25 +879,25 @@ class UnifiedInference:
                 trajectory_pattern = r'(\d+),\s*(\d+),\s*([+-]?\d+\.\d+)'
                 trajectory_points = re.findall(trajectory_pattern, result_text)
                 plot_trajectories = [[(int(x), int(y), float(d)) for x, y, d in trajectory_points]]
-                print(f"Extracted trajectory points: {plot_trajectories}")
+                #print(f"Extracted trajectory points: {plot_trajectories}")
                 image_name_to_save = os.path.basename(image[0]).replace(".", "_with_trajectory_annotated.")
             elif task == "pointing":
                 point_pattern = r'\(\s*(\d+)\s*,\s*(\d+)\s*,\s*([+-]?\d+\.\d+)\s*\)'
                 points = re.findall(point_pattern, result_text)
                 plot_points = [(int(x), int(y), float(d)) for x, y, d in points]
-                print(f"Extracted points: {plot_points}")
+                #print(f"Extracted points: {plot_points}")
                 image_name_to_save = os.path.basename(image[0]).replace(".", "_with_pointing_annotated.")
             elif task == "grounding":
                 box_pattern = r'\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]'
                 boxes = re.findall(box_pattern, result_text)
                 plot_boxes = [[int(x1), int(y1), int(x2), int(y2)] for x1, y1, x2, y2 in boxes]
-                print(f"Extracted bounding boxes: {plot_boxes}")
+                #print(f"Extracted bounding boxes: {plot_boxes}")
                 image_name_to_save = os.path.basename(image[0]).replace(".", "_with_grounding_annotated.")
             elif task == "positioning":
                 point_pattern = r'\(\s*(\d+)\s*,\s*(\d+)\s*,\s*([+-]?\d+\.\d+)\s*\)'
                 positionings = re.findall(point_pattern, result_text)
                 plot_pos = [(int(x), int(y), float(d)) for x, y, d in positionings]
-                print(f"Extracted positionings: {plot_pos}")
+                #print(f"Extracted positionings: {plot_pos}")
                 image_name_to_save = os.path.basename(image[0]).replace(".", "_with_positioning_annotated.")
 
             os.makedirs("result", exist_ok=True)

@@ -72,6 +72,7 @@ class RobotController:
             self.robot.change_tool_info(gripper)
             print(f"Connected to robot at {self.host}")
 
+            
             #self.toggle_free_drive()
             self.go_home()
             time.sleep(0.5)
@@ -459,7 +460,7 @@ class RobotController:
         target = self._compute_target_xyz(lift_base, +0.05)
         if not self._confirm_step("LIFT approach +5cm", image,
                                   target_pos=target,
-                                  target_rot=lift_base[1],
+                                  target_rot=[math.pi, 0, -math.pi / 2],
                                   reference_pixels=ref_pixels,
                                   lift_angle_deg=lift_angle_deg):
             return False
@@ -511,7 +512,7 @@ class RobotController:
             # Переписываем z на безопасную высоту 0.4 (xy берём из расчёта при HOME).
             target_pos_base, output_rot, _ = mid_base
             mid_xyz = [target_pos_base[0], target_pos_base[1], self.MIDDLE_WAYPOINT_Z]
-            mid_pos = position(mid_xyz, output_rot)
+            mid_pos = position(mid_xyz, [math.pi, 0, -math.pi / 2])
 
             # Если есть пиксель для этого middle, добавим в reference_pixels.
             mid_ref = list(ref_pixels)

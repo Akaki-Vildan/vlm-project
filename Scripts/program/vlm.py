@@ -80,27 +80,50 @@ class VLMProcessor:
         """Отправляет изображение + промпт в модель и возвращает
         (pred_text, annotated_image_or_None).
 
+        Принимает один из трёх вариантов image_data:
+          • np.ndarray                — одно изображение (будет сохранено во
+                                        временный jpg и отправлено как путь).
+          • str / pathlib.Path        — путь к одному изображению на диске.
+          • list / tuple              — несколько изображений. Каждый элемент
+                                        может быть np.ndarray ИЛИ путём (str).
+                                        Используется для task='planing'
+                                        (REFERENCE + CURRENT).
+
         Временные файлы и GPU-кэш чистятся в finally даже при падении инференса.
         """
-        temp_file_path = None
-        if isinstance(image_data, np.ndarray):
+        # Список временных файлов, созданных в этом вызове (для очистки в finally).
+        temp_paths = []
+
+        if isinstance(image_data, (list, tuple)):
+            # Много-изображений (например planing: REFERENCE + CURRENT).
+            # Каждый элемент приводим к пути на диске.
+            image_to_send = []
+            for item in image_data:
+                if isinstance(item, np.ndarray):
+                    tf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                    p = tf.name
+                    tf.close()
+                    cv2.imwrite(p, item)
+                    temp_paths.append(p)
+                    image_to_send.append(p)
+                else:
+                    # уже путь (str / Path)
+                    image_to_send.append(str(item))
+        elif isinstance(image_data, np.ndarray):
             tf = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
             temp_file_path = tf.name
             tf.close()
             cv2.imwrite(temp_file_path, image_data)
+            temp_paths.append(temp_file_path)
             image_to_send = temp_file_path
         else:
+            # str / Path — отдаём как есть, без создания temp-файла.
             image_to_send = image_data
 
-        try:
-            return self.model.inference(
-                prompt_text, image_to_send, task=task,
-                do_sample=do_sample, temperature=temperature, plot=plot,
-            )
-        finally:
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-            self._cleanup_gpu(label=f"after:{task}")
+        return self.model.inference(
+            prompt_text, image_to_send, task=task,
+            do_sample=do_sample, temperature=temperature, plot=plot,
+        )
 
     # ------------------------------------------------------------------
     # Высокоуровневые методы —这才是caller должен использовать.
@@ -140,6 +163,100 @@ class VLMProcessor:
                                 task=self.TASK_POINTING, plot=plot)
 
     # ------------------------------------------------------------------
+    # Planning (high-level decomposition of a task into a flat list of
+    # trajectory descriptions). Independent of find_trajectory.
+    # ------------------------------------------------------------------
+    def plan_task(self, images, prompt, plot=False):
+        """Двухстадийный PLANNER: декомпозирует пользовательскую задачу в
+        плоский список строк-описаний траекторий (минимальное число шагов).
+
+        Поддерживает ДВА режима (промпт сам разрулит по числу картинок):
+
+          MODE A — восстановление последовательности (2 кадра):
+              images = [REFERENCE, CURRENT]
+              IMAGE 1 = REFERENCE (target state — «как должно быть»)
+              IMAGE 2 = CURRENT   (present state — «как есть сейчас»)
+              VLM сравнивает их и находит минимальный набор pick-and-place
+              действий, преобразующих CURRENT в REFERENCE.
+
+          MODE B — просто high-level задача (1 кадр):
+              images = [CURRENT]
+              IMAGE 1 = CURRENT (present state)
+              VLM читает текстовую задачу и находит минимальный набор
+              pick-and-place действий, удовлетворяющих ей на видимой сцене.
+
+        Stage 1: модель получает images + пользовательскую задачу и возвращает
+                 плоский список ["описание_1", "описание_2", ...].
+        Stage 2 (внутри inference): план-специфичный QC
+                 (prompt_planing_validation) верифицирует/переформатирует ответ.
+                 Дополнительно _looks_valid('planing') проверяет структуру
+                 (плоский список непустых строк без переносов).
+
+        Args:
+            images: список/кортеж из 1 ИЛИ 2 изображений:
+                      MODE A: [REFERENCE, CURRENT] (строгий порядок).
+                      MODE B: [CURRENT].
+                    Каждое изображение может быть np.ndarray ИЛИ путём (str).
+            prompt: высокоуровневая задача оператора.
+            plot:   зарезервировано (для planing нет аннотированного изображения).
+
+        Returns:
+            (plan, None) — план: list[str], каждый элемент — self-contained
+                           описание одной траектории для run_trajectory.
+            (None, None)  — при ошибке / пустом ответе / отказе оператора.
+        """
+        if not isinstance(images, (list, tuple)) or len(images) not in (1, 2):
+            got = len(images) if hasattr(images, '__len__') else type(images).__name__
+            print(f"[VLM] plan_task expects 1 image (CURRENT) or 2 images "
+                  f"(REFERENCE, CURRENT), got {got}")
+            return None, None
+
+        mode = "A (REFERENCE + CURRENT)" if len(images) == 2 else "B (CURRENT only)"
+        print(f"[VLM] plan_task mode: {mode}")
+
+        # send_request сам приведёт np.ndarray / str к путям на диске и почистит
+        # temp-файлы + GPU-кэш в finally.
+        pred, _img = self.send_request(
+            prompt, list(images), self.TASK_PLANING,
+            do_sample=True, temperature=0.8, plot=plot,
+        )
+        if not pred:
+            print("[VLM] No plan prediction")
+            return None, None
+        print(f"[VLM] plan prediction: {pred}")
+
+        data = self.safe_parse(pred)
+        if not data or not isinstance(data, (list, tuple)) or len(data) == 0:
+            print("[VLM] Failed to parse plan response")
+            return None, None
+
+        # Каждый элемент должен быть строкой. Если модель отдала legacy-формат
+        # [[desc, type], ...] — оставляем как есть, валидатор в inference уже
+        # должен был его починить, но на всякий случай фильтруем/разворачиваем.
+        clean = []
+        for entry in data:
+            if isinstance(entry, str):
+                s = entry.strip()
+                if s:
+                    clean.append(s)
+            elif isinstance(entry, (list, tuple)) and len(entry) >= 1 and isinstance(entry[0], str):
+                # legacy [description, type] — берём только описание.
+                s = entry[0].strip()
+                if s:
+                    clean.append(s)
+            else:
+                print(f"[VLM] Skipping invalid plan entry: {entry!r}")
+
+        if not clean:
+            print("[VLM] Plan is empty after cleanup")
+            return None, None
+
+        print(f"[VLM] plan steps ({len(clean)}):")
+        for i, step in enumerate(clean, 1):
+            print(f"[VLM]   {i}/{len(clean)}: {step}")
+        return clean, None
+
+    # ------------------------------------------------------------------
     # Trajectory (независимая функция — НЕ часть pick/put pipeline)
     # ------------------------------------------------------------------
     def find_trajectory(self, image, prompt, plot=True):
@@ -166,7 +283,7 @@ class VLMProcessor:
         Примечание: if в промпте упомянут только один объект (без placement),
         Stage 2 принудит LAST = FIRST (поставить обратно на то же место).
         """
-        pred, img = self.send_request(prompt, image, self.TASK_TRAJECTORY, plot=plot)
+        pred, img = self.send_request(prompt, image, self.TASK_TRAJECTORY, plot=plot, temperature=0.4)
         if not pred:
             print("[VLM] No trajectory prediction")
             return None, None

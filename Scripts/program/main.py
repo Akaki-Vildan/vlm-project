@@ -9,7 +9,12 @@ def main():
     pipeline = PickAndPlacePipeline()
     try:
         pipeline.setup()
-        pipeline.run_trajectory()  # вместо pipeline.run()
+        # Plan mode: operator enters high-level task → captures REFERENCE + CURRENT
+        # → VLM planner returns a flat list of trajectory descriptions → each
+        # description is sent in turn to run_trajectory (which captures a fresh
+        # frame, plans the trajectory and moves the robot). On the first failed
+        # step, plan execution aborts.
+        pipeline.run_plan()
     finally:
         pipeline.cleanup()
 

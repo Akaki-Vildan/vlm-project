@@ -257,6 +257,149 @@ class PickAndPlacePipeline:
             self.cleanup()
 
     # ------------------------------------------------------------------
+    # Plan mode — высокоуровневое планирование.
+    #
+    # ДВА режима (оператор выбирает в начале через input):
+    #
+    #   1) RESTORE  — восстановление последовательности (2 кадра).
+    #      Оператор расставляет объекты в TARGET конфигурацию → 'p' (REFERENCE)
+    #      → меняет сцену на CURRENT → 'p' (CURRENT).
+    #      VLM получает [REFERENCE, CURRENT] + задачу и находит МИНИМАЛЬНЫЙ
+    #      набор pick-and-place действий, преобразующих CURRENT в REFERENCE.
+    #
+    #   2) HIGH-LEVEL — просто high-level задача (1 кадр).
+    #      Оператор жмёт 'p' один раз (CURRENT).
+    #      VLM получает [CURRENT] + текстовую задачу и находит МИНИМАЛЬНЫЙ
+    #      набор pick-and-place действий, удовлетворяющих задаче на видимой сцене.
+    #
+    # После получения плана никакой проверки оператором НЕТ — план сразу
+    # уходит на выполнение. Каждый шаг по очереди идёт в run_trajectory
+    # (который сам делает свежий кадр, строит траекторию и подтверждает
+    # каждое движение робота). На первом же False шаге выполнение плана
+    # прекращается.
+    # ------------------------------------------------------------------
+    def run_plan(self, prompt=None):
+        """Полный цикл PLANNING (два режима — RESTORE / HIGH-LEVEL).
+
+        Шаги:
+          1. Выбор режима через input(): 1 = RESTORE (2 кадра), 2 = HIGH-LEVEL (1 кадр).
+          2. Захват кадра(ов) — оператор видит live стрим и жмёт 'p':
+               RESTORE     → capture_two_frames("REFERENCE", "CURRENT")
+               HIGH-LEVEL  → capture_frame()
+          3. Запрос high-level задачи (input()) — оператор вводит промпт,
+             когда кадр(ы) уже зафиксирован(ы).
+          4. VLM plan_task(images, prompt) → list[str] описаний траекторий.
+          5. План выводится в консоль (также внутри plan_task).
+             Никакой верификации оператором — сразу к выполнению.
+          6. Цикл по шагам плана:
+               ok = run_trajectory(step)
+               если ok == False → прекратить выполнение плана.
+          7. Return True если ВСЕ шаги выполнены, False — если прервано.
+
+        GPU-кэш чистится автоматически: send_request (внутри plan_task и
+        внутри run_trajectory) дёргает _cleanup_gpu() в finally.
+        """
+        if not self._initialized:
+            print("[PIPELINE] Hardware not initialized. Call setup() first.")
+            return False
+
+        # 1. Выбор режима.
+        print("\n" + "=" * 60)
+        print("[PIPELINE] === PLAN MODE — choose mode ===")
+        print("[PIPELINE]   1) RESTORE   — restore a sequence (2 frames: REFERENCE + CURRENT)")
+        print("[PIPELINE]   2) HIGH-LEVEL — single-frame task (1 frame: CURRENT only)")
+        print("=" * 60)
+        mode_input = input("[PIPELINE] Enter mode (1 or 2): ").strip()
+        if mode_input == "1":
+            mode = "RESTORE"
+        elif mode_input == "2":
+            mode = "HIGH-LEVEL"
+        else:
+            print(f"[PIPELINE] Invalid mode '{mode_input}', aborting plan")
+            return False
+        print(f"[PIPELINE] Selected mode: {mode}\n")
+
+        # 2. Захват кадра(ов) — оператор видит live стрим и жмёт 'p'.
+        if mode == "RESTORE":
+            print("\n" + "=" * 60)
+            print("[PIPELINE] === RESTORE — two-frame capture ===")
+            print("[PIPELINE] Step 1: arrange the scene in the TARGET configuration")
+            print("[PIPELINE]         and press 'p' to capture REFERENCE (IMAGE 1).")
+            print("[PIPELINE] Step 2: change the scene to the CURRENT state")
+            print("[PIPELINE]         and press 'p' again to capture CURRENT (IMAGE 2).")
+            print("=" * 60 + "\n")
+
+            (ref_img, _ref_depth, _ref_intrin), \
+                (cur_img, _cur_depth, _cur_intrin) = self.cam.capture_two_frames(
+                    "REFERENCE", "CURRENT"
+                )
+            if ref_img is None or cur_img is None:
+                print("[PIPELINE] Two-frame capture aborted, aborting plan")
+                return False
+            images = [ref_img, cur_img]
+            print("\n[PIPELINE] Frames captured (REFERENCE + CURRENT).")
+        else:  # HIGH-LEVEL
+            print("\n" + "=" * 60)
+            print("[PIPELINE] === HIGH-LEVEL — single-frame capture ===")
+            print("[PIPELINE] Press 'p' to capture CURRENT (the only frame).")
+            print("=" * 60 + "\n")
+
+            cur_img, _cur_depth, _cur_intrin = self.cam.capture_frame()
+            if cur_img is None:
+                print("[PIPELINE] Capture aborted, aborting plan")
+                return False
+            images = [cur_img]
+            print("\n[PIPELINE] Frame captured (CURRENT).")
+
+        # 3. Промпт high-level задачи — оператор вводит его, когда кадр(ы)
+        #    уже зафиксирован(ы).
+        if prompt is None:
+            prompt = input("\nGet high-level task: ").strip()
+            if not prompt:
+                print("[PIPELINE] Empty prompt, aborting plan")
+                return False
+
+        # 4. VLM plan_task — возвращает list[str] описаний траекторий.
+        #    send_request внутри сам чистит temp-файлы и GPU-кэш.
+        print(f"\n[PIPELINE] === Sending {len(images)} frame(s) to VLM planner ===")
+        plan, _ = self.vlm.plan_task(images, prompt)
+        if plan is None or len(plan) == 0:
+            print("[PIPELINE] Plan generation failed, aborting")
+            return False
+
+        # 5. План уже выведен в консоль внутри vlm.plan_task.
+        #    Дублируем кратко для удобства. Никакой верификации — сразу к
+        #    выполнению.
+        print("\n" + "=" * 60)
+        print(f"[PIPELINE] === PLAN READY — {len(plan)} step(s), mode={mode} ===")
+        for i, step in enumerate(plan, 1):
+            print(f"[PIPELINE]   {i}/{len(plan)}: {step}")
+        print("=" * 60 + "\n")
+
+        # 6. Выполнение шагов плана.
+        n = len(plan)
+        print(f"[PIPELINE] === EXECUTING PLAN ({n} steps) ===\n")
+        for i, step in enumerate(plan, 1):
+            print("\n" + "-" * 60)
+            print(f"[PIPELINE] === PLAN STEP {i}/{n} ===")
+            print(f"[PIPELINE] Step description: {step}")
+            print("-" * 60)
+
+            # run_trajectory сам: делает свежий кадр → VLM trajectory →
+            # конвертация в пиксели/3D → угол lift → подтверждение оператором
+            # → robot.move_through_trajectory (с подтверждением КАЖДОГО шага
+            # движения).
+            ok = self.run_trajectory(step)
+            if not ok:
+                print(f"\n[PIPELINE] Step {i}/{n} FAILED — aborting plan execution")
+                return False
+            print(f"[PIPELINE] Step {i}/{n} OK")
+
+        print(f"\n[PIPELINE] === PLAN COMPLETE ({n} steps executed) ===")
+        self.vlm._cleanup_gpu()
+        return True
+
+    # ------------------------------------------------------------------
     # Внутренний цикл одной операции
     # ------------------------------------------------------------------
     def _run_action(self, prompt, action):

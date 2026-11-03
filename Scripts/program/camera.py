@@ -23,12 +23,22 @@ class RealSenseCamera:
         self.align = rs.align(rs.stream.color)
         self.profile = None
         self.depth_scale = 0.0
+        # Флаг: запущен ли pipeline прямо сейчас. Нужен, чтобы capture_frame /
+        # capture_two_frames могли вызываться многократно — после первого
+        # capture pipeline остаётся запущенным, и следующий capture не падает
+        # с 'wait_for_frames cannot be called before start()'.
+        self._streaming = False
 
     # ------------------------------------------------------------------
     # Жизненный цикл
     # ------------------------------------------------------------------
     def start(self):
-        """Включает камеру и прогревает её (30 фреймов)."""
+        """Включает камеру и прогревает её (30 фреймов).
+
+        Idempotent: если pipeline уже запущен — ничего не делает.
+        """
+        if self._streaming:
+            return
         self.profile = self.pipeline.start(self.config)
         self.depth_scale = (
             self.profile.get_device().first_depth_sensor().get_depth_scale()
@@ -37,14 +47,38 @@ class RealSenseCamera:
         for _ in range(30):
             self.pipeline.wait_for_frames()
         print("Camera ready!\n")
+        self._streaming = True
 
     def stop(self):
         """Безопасно останавливает поток камеры (idempotent)."""
+        if not self._streaming:
+            cv2.destroyAllWindows()
+            return
         try:
             self.pipeline.stop()
         except Exception:
             pass
+        self._streaming = False
         cv2.destroyAllWindows()
+
+    def _ensure_streaming(self):
+        """Запускает pipeline БЕЗ прогрева, если он ещё не запущен.
+
+        Используется capture_frame / capture_two_frames: после первого capture
+        pipeline остаётся запущенным (см. фиксы ниже — capture-методы больше
+        не дёргают self.pipeline.stop()), и последующие capture-вызовы не
+        падают с 'wait_for_frames cannot be called before start()'.
+
+        Прогрев (30 фреймов) выполняется только один раз — в start(), который
+        вызывает pipeline.setup() в самом начале работы.
+        """
+        if self._streaming:
+            return
+        self.profile = self.pipeline.start(self.config)
+        self.depth_scale = (
+            self.profile.get_device().first_depth_sensor().get_depth_scale()
+        )
+        self._streaming = True
 
     # ------------------------------------------------------------------
     # Захват
@@ -53,7 +87,15 @@ class RealSenseCamera:
         """Живой поток: 'p' - захват, 'q' - выход.
 
         Возвращает (color_image, depth_image, intrinsics) либо (None, None, None).
+
+        ВАЖНО: после захвата ('p') pipeline ОСТАЁТСЯ запущенным — это позволяет
+        вызывать capture_frame многократно (например, в режиме planing: сначала
+        capture_two_frames, потом capture_frame для каждой траектории).
+        Полная остановка камеры выполняется только в stop() (через cleanup()).
         """
+        # Перезапустить pipeline без прогрева, если он был остановлен.
+        self._ensure_streaming()
+
         print("Streaming... Press 'p' to capture, or 'q' to quit.")
         while True:
             frames = self.pipeline.wait_for_frames(timeout_ms=1000)
@@ -80,13 +122,99 @@ class RealSenseCamera:
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('p'):
-                self.pipeline.stop()
+                # НЕ останавливаем pipeline — пусть остаётся запущенным
+                # для следующих capture-вызовов. Только закрываем окна.
                 cv2.destroyAllWindows()
                 return color_image.copy(), depth_image.copy(), intrin
             elif key == ord('q'):
-                self.pipeline.stop()
-                cv2.destroyAllWindows()
+                # 'q' — явная остановка камеры оператором.
+                self.stop()
                 return None, None, None
+
+    def capture_two_frames(self, label1="REFERENCE", label2="CURRENT"):
+        """Захват двух кадров в одном потоковом сеансе (без перезапуска камеры
+        между ними — без 30-фреймового прогрева).
+
+        Используется для режима PLANNING:
+          1) оператор расставляет объекты в целевую конфигурацию и жмёт 'p' →
+             IMAGE 1 (REFERENCE / «как должно быть»);
+          2) оператор меняет сцену на текущее состояние и жмёт 'p' второй раз →
+             IMAGE 2 (CURRENT / «как есть сейчас»);
+          3) 'q' на любом этапе — отмена.
+
+        В окне стрима показывается статус: какой кадр сейчас ждётся и что уже
+        захвачено. После первого захвата рисуется метка CAPTURED-1 в углу.
+
+        Returns:
+            ((img1, depth1, intrin1), (img2, depth2, intrin2))
+            При отмене: ((None, None, None), (None, None, None)).
+        """
+        # Перезапустить pipeline без прогрева, если он был остановлен.
+        self._ensure_streaming()
+
+        print(f"Streaming... Press 'p' to capture {label1}, then 'p' again for {label2}, 'q' to quit.")
+        captured = []  # список кортежей (color, depth, intrin)
+        labels = [label1, label2]
+        step = 0  # 0 = ждём IMAGE 1, 1 = ждём IMAGE 2
+
+        while True:
+            frames = self.pipeline.wait_for_frames(timeout_ms=1000)
+            aligned = self.align.process(frames)
+            color_frame = aligned.get_color_frame()
+            depth_frame = aligned.get_depth_frame()
+
+            if not color_frame or not depth_frame:
+                continue
+
+            color_image = np.asanyarray(color_frame.get_data())
+            depth_image = np.asanyarray(depth_frame.get_data())
+            intrin = (
+                depth_frame.get_profile()
+                .as_video_stream_profile()
+                .get_intrinsics()
+            )
+
+            # Копия для отрисовки статуса (исходный кадр не модифицируем).
+            disp = color_image.copy()
+
+            # Полупрозрачная чёрная панель сверху под текст.
+            overlay = disp.copy()
+            cv2.rectangle(overlay, (0, 0), (disp.shape[1], 70), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.55, disp, 0.45, 0, disp)
+
+            if step == 0:
+                cv2.putText(disp, f"Press 'p' to capture IMAGE 1 ({label1})",
+                            (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.putText(disp, "Then rearrange scene and press 'p' again for IMAGE 2",
+                            (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            else:
+                cv2.putText(disp, f"IMAGE 1 ({label1}) CAPTURED. Press 'p' to capture IMAGE 2 ({label2})",
+                            (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+                cv2.putText(disp, "Press 'q' to abort",
+                            (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            cv2.imshow('Two-frame capture', disp)
+
+            depth_colormap = cv2.applyColorMap(
+                cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET
+            )
+            cv2.imshow('Depth Stream', depth_colormap)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('p'):
+                captured.append((color_image.copy(), depth_image.copy(), intrin))
+                print(f"[CAMERA] Captured IMAGE {step + 1} ({labels[step]})")
+                step += 1
+                if step >= 2:
+                    # НЕ останавливаем pipeline — пусть остаётся запущенным
+                    # для следующих capture_frame-вызовов из run_trajectory.
+                    cv2.destroyAllWindows()
+                    return captured[0], captured[1]
+            elif key == ord('q'):
+                print(f"[CAMERA] Aborted at step {step} ({labels[step]})")
+                self.stop()
+                return (None, None, None), (None, None, None)
+
 
     # ------------------------------------------------------------------
     # 3D-депроекция
