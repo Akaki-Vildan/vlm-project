@@ -8,6 +8,7 @@ main.py становится минимальным: создаёт pipeline и 
 """
 
 import cv2
+import math
 
 from camera import RealSenseCamera
 from robot import RobotController
@@ -68,21 +69,30 @@ class PickAndPlacePipeline:
 
     # ------------------------------------------------------------------
     # Trajectory mode — НЕЗАВИСИМО от pick/put.
-    # VLM строит траекторию → для первой точки (lift) вычисляется угол через
-    # 10×10 bbox + контуры → robot.move_through_trajectory.
+    #
+    # НОВЫЙ ПОТОК (угол ищется ПОСЛЕ движения робота над объект):
+    #   1. Захват кадра в HOME.
+    #   2. VLM find_trajectory → waypoints.
+    #   3. Конвертация VLM → пиксели → 3D камеры.
+    #   4. Верификация точек оператором.
+    #   5. robot.move_through_trajectory с angle_finder_callback:
+    #        a) робот едет к (lift_xy, z=0.4) — "над объект"
+    #        b) callback: cam.capture_frame_now → центр кадра →
+    #           cam.find_angle_around_point → если 0.0 → спросить оператора
+    #        c) робот поворачивается на месте (apply yaw)
+    #        d) робот спускается к +5см, +2см, grip, close
+    #        e) middle waypoints, placement — как раньше
     # ------------------------------------------------------------------
     def run_trajectory(self, prompt=None):
         """Полный цикл TRAJECTORY (отдельно от pick/put):
 
-        1. Захват кадра.
-        2. VLM find_trajectory (двухстадийный: Stage 1 поиск + Stage 2 рефакторинг).
-           Возвращает waypoints [[x, y, d], ...] в VLM-координатах (0..1000).
-        3. Для первой точки (lift): вычисляется угол объекта через
-           cam.find_angle_around_point(image, lift_pixel, window_size=10).
-           Создаётся 10×10 px прямоугольник вокруг точки подъёма, внутри него
-           ищется контур и возвращается угол объекта.
-        4. Все waypoints конвертируются из VLM → пиксели → 3D камеры.
-        5. Robot.move_through_trajectory(camera_points, image, lift_angle_deg).
+        1. Захват кадра в HOME.
+        2. VLM find_trajectory → waypoints [[x, y, d], ...].
+        3. Конвертация ВСЕХ waypoints: VLM(0..1000) → пиксели → 3D камеры.
+        4. Верификация точек оператором (LIFT/PLACE/MIDDLE на HOME-кадре).
+        5. robot.move_through_trajectory с angle_finder_callback:
+           Угол LIFT ищется ПОСЛЕ того как робот приехал над объект
+           (через cam.find_angle_around_point в центре нового кадра).
 
         Returns: True, если траектория выполнена, False иначе.
         """
@@ -140,16 +150,13 @@ class PickAndPlacePipeline:
         print(f"[PIPELINE] PLACE   VLM=({placement_wp[0]}, {placement_wp[1]})  "
               f"pixel=({placement_pixel.x}, {placement_pixel.y})")
 
-        # 5. Угол для первой точки (lift = точка подъёма).
-        #    Берём lift_pixel, вокруг него строим 30×30 bbox и ищем контур.
-        lift_angle_deg = self.cam.find_angle_around_point(
-            image, lift_pixel, window_size=30
-        )
-        print(f"[PIPELINE] Lift angle (30x30 contour): {lift_angle_deg}°")
-
-        # 6. Конвертация всех пикселей → 3D координаты камеры.
+        # 5. Конвертация всех пикселей → 3D координаты камеры.
         #    ВСЕ way-ы через depth_image (lift, middles, placement) — как просил.
         #    z middles потом принудительно станет 0.4 в robot.move_through_trajectory.
+        #
+        #    ВАЖНО: угол LIFT здесь НЕ ищется (как было раньше).
+        #    Угол ищется ПОСЛЕ того как робот приедет над объект — через
+        #    angle_finder_callback внутри robot.move_through_trajectory.
         all_pixels = [lift_pixel] + middle_pixels + [placement_pixel]
         camera_points = []
         n_wp = len(waypoints)
@@ -173,32 +180,42 @@ class PickAndPlacePipeline:
                   f"(got {len(camera_points)}, need >= 2)")
             return False
 
-        # 7. Визуальная верификация: рисуем все точки на кадре.
+        # 6. Визуальная верификация: рисуем все точки на HOME-кадре.
         #    LIFT — красный круг, PLACE — синий, middles — зелёные точки.
-        #    Оператор видит ГДЕ окажется lift-точка после конверсии, и может
-        #    понять, дрейфует ли координата на каком-то этапе.
+        #    ОСЬ УГЛА НЕ РИСУЕТСЯ — угол ещё не найден (будет найден после
+        #    движения робота над объект).
         if not self._verify_trajectory_points(
-            image, lift_pixel, placement_pixel, middle_pixels, lift_angle_deg
+            image, lift_pixel, placement_pixel, middle_pixels
         ):
             print("[PIPELINE] User aborted at trajectory verification")
             return False
 
-        # 8. Выполнение траектории роботом.
-        #    Передаём пиксели lift/placement/middles для отрисовки в окнах
-        #    подтверждения — оператор видит их при каждом шаге движения.
+        # 7. Выполнение траектории роботом.
+        #    angle_finder_callback — замыкание, которое будет вызвано ПОСЛЕ
+        #    того как робот приедет к (lift_xy, z=0.4). Внутри callback:
+        #      - cam.capture_frame_now() — новый кадр (камера над объект)
+        #      - центр кадра как пиксель объекта + красная точка для проверки
+        #      - cam.find_angle_around_point(image, center, window_size=30)
+        #      - если angle=0.0 → _ask_operator_angle (C/Q/M)
+        #    Возвращает (yaw_rad, center_pixel, disp_image) или None (abort).
+        angle_finder = self._make_angle_finder(prompt)
         return self.robot.move_through_trajectory(
-            camera_points, image=image, lift_angle_deg=lift_angle_deg,
+            camera_points, image=image,
             lift_pixel=lift_pixel, placement_pixel=placement_pixel,
             middle_pixels=middle_pixels,
+            angle_finder_callback=angle_finder,
         )
 
     def _verify_trajectory_points(self, image, lift_pixel, placement_pixel,
-                                  middle_pixels, lift_angle_deg) -> bool:
-        """Рисует все точки траектории на кадре и ждёт подтверждения.
+                                  middle_pixels) -> bool:
+        """Рисует все точки траектории на HOME-кадре и ждёт подтверждения.
 
         LIFT    — красный круг + метка "LIFT"
         PLACE   — синий  круг + метка "PLACE"
         MIDDLE  — маленькие зелёные точки с номерами
+
+        ОСЬ УГЛА НЕ РИСУЕТСЯ: угол lift ещё не найден — он будет найден
+        ПОСЛЕ движения робота над объект (через angle_finder_callback).
 
         Возвращает True если 'C' (continue), False если 'Q' (abort).
         """
@@ -211,19 +228,13 @@ class PickAndPlacePipeline:
                 cv2.putText(disp, f"M{i+1}", (int(mp.x) + 6, int(mp.y) - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
 
-        # Lift (красный круг + метка)
+        # Lift (красный круг + метка) — БЕЗ оси угла (угол ещё не найден)
         if lift_pixel is not None:
             cv2.circle(disp, (int(lift_pixel.x), int(lift_pixel.y)),
                        8, (0, 0, 255), -1)
             cv2.putText(disp, "LIFT",
                         (int(lift_pixel.x) + 12, int(lift_pixel.y)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            # Рисуем ось угла lift
-            import math as _m
-            end_x = int(lift_pixel.x + 40 * _m.cos(_m.radians(lift_angle_deg)))
-            end_y = int(lift_pixel.y - 40 * _m.sin(_m.radians(lift_angle_deg)))
-            cv2.line(disp, (int(lift_pixel.x), int(lift_pixel.y)),
-                     (end_x, end_y), (0, 0, 255), 2)
 
         # Placement (синий круг + метка)
         if placement_pixel is not None:
@@ -234,10 +245,11 @@ class PickAndPlacePipeline:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
         cv2.putText(disp,
-                    f"LIFT pixel=({lift_pixel.x},{lift_pixel.y})  angle={lift_angle_deg}°  "
-                    f"PLACE pixel=({placement_pixel.x},{placement_pixel.y})",
+                    f"LIFT pixel=({lift_pixel.x},{lift_pixel.y})  "
+                    f"PLACE pixel=({placement_pixel.x},{placement_pixel.y})  "
+                    f"(angle found AFTER move above object)",
                     (10, disp.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         cv2.putText(disp, "Verify points. Press 'C' to continue, 'Q' to abort",
                     (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
@@ -246,6 +258,173 @@ class PickAndPlacePipeline:
         key = cv2.waitKey(0) & 0xFF
         cv2.destroyAllWindows()
         return key in (ord('c'), ord('C'))
+
+    # ------------------------------------------------------------------
+    # Angle finder callback — вызывается ИЗ robot.move_through_trajectory
+    # ПОСЛЕ того как робот приехал к (lift_xy, z=0.4) "над объект".
+    # ------------------------------------------------------------------
+    def _make_angle_finder(self, prompt):
+        """Создаёт callback для поиска угла ПОСЛЕ движения робота над объект.
+
+        Замыкание, которое будет вызвано из robot.move_through_trajectory
+        (шаг 2) после того как робот приедет к (lift_xy, z=0.4).
+
+        Внутри callback:
+          1. cam.capture_frame_now() — новый кадр + intrin (камера над объект)
+          2. ПРОЕКЦИЯ 3D: robot.project_base_point_to_camera_pixel(lift_base_xyz, intrin)
+             — вычисляет ТОЧНЫЙ пиксель объекта на новом кадре, учитывая
+             смещение камеры от TCP (H_tcp_to_cam_file = [-0.014, 0.05853, 0.068]).
+             Если проекция не удалась → fallback на центр кадра.
+          3. Рисует красную точку + метку PROJECTED на копии кадра → показывает
+             оператору (для визуальной проверки точности проекции).
+          4. cam.find_angle_around_point(image, projected_pixel, window_size=30)
+             — внутри показывает окна Area / Roi / Canny / contour
+          5. Если angle == 0.0 (контур не найден) → _ask_operator_angle (C/Q/M)
+          6. return (math.radians(angle_deg), projected_pixel, disp) или None (abort)
+
+        Args:
+            prompt: текстовое описание шага траектории (для контекста/логов).
+
+        Returns:
+            callable (lift_base_xyz) → (yaw_rad, pixel, disp_image) или None.
+        """
+        def finder(lift_base_xyz):
+            # 1. Захват нового кадра (камера теперь над объект).
+            print(f"[ANGLE_FINDER] Capturing new frame (camera above object)...")
+            print(f"[ANGLE_FINDER] Context prompt: {prompt}")
+            new_image, _new_depth, new_intrin = self.cam.capture_frame_now()
+            if new_image is None:
+                print("[ANGLE_FINDER] Failed to capture frame — using yaw=0")
+                return (0.0, None, None)
+
+            # 2. ПРОЕКЦИЯ 3D → пиксель.
+            #    Робот стоит над объектом (TCP в (lift_xy, z=0.4)), но камера
+            #    смещена от TCP на H_tcp_to_cam_file. Проекция точно вычисляет
+            #    где объект виден в кадре — с учётом этого смещения.
+            pixel = None
+            if lift_base_xyz is not None and new_intrin is not None:
+                print(f"[ANGLE_FINDER] Projecting lift_base_xyz → camera pixel "
+                      f"(accounting for H_tcp_to_cam offset)...")
+                pixel = self.robot.project_base_point_to_camera_pixel(
+                    lift_base_xyz, new_intrin
+                )
+
+            if pixel is not None:
+                cx, cy = int(pixel.x), int(pixel.y)
+                print(f"[ANGLE_FINDER] Projected pixel: ({cx}, {cy}) "
+                      f"— accounts for camera-TCP offset")
+                pixel_label = f"PROJECTED ({cx},{cy})"
+            else:
+                # Fallback: центр кадра (если проекция не удалась).
+                cx = self.cam.width // 2
+                cy = self.cam.height // 2
+                print(f"[ANGLE_FINDER] Projection failed — falling back to "
+                      f"center ({cx}, {cy})")
+                pixel_label = f"CENTER-fallback ({cx},{cy})"
+            center_pixel = Point2D(x=cx, y=cy)
+
+            # 3. Рисуем красную точку + метку на копии для визуальной проверки.
+            #    ОПЕРАТОР ВИДИТ: объект точно под красной точкой?
+            #    Если есть отклонение → калибровка H_tcp_to_cam неточная.
+            disp = new_image.copy()
+            cv2.circle(disp, (cx, cy), 8, (0, 0, 255), -1)  # красная точка
+            cv2.putText(disp, pixel_label,
+                        (cx + 12, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            # Полупрозрачная панель сверху под инструкцию.
+            overlay = disp.copy()
+            cv2.rectangle(overlay, (0, 0), (disp.shape[1], 40), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.55, disp, 0.45, 0, disp)
+            cv2.putText(disp, "Verify object is at red dot. Press any key to continue",
+                        (10, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1)
+            cv2.imshow("Above Object - Projected Pixel", disp)
+            print("[ANGLE_FINDER] Showing projected-pixel window. "
+                  "Press any key to continue...")
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+
+            # 4. Поиск угла через cv2 контуры в окне 30×30 вокруг пикселя.
+            #    find_angle_around_point внутри показывает окна: Area / Roi / contour.
+            print(f"[ANGLE_FINDER] Running find_angle_around_point "
+                  f"(window_size=30) around ({cx}, {cy})...")
+            angle_deg = self.cam.find_angle_around_point(
+                new_image, center_pixel, window_size=30
+            )
+            print(f"[ANGLE_FINDER] find_angle_around_point returned: {angle_deg}°")
+
+            # 5. Если контур не найден (angle=0.0) → спросить оператора.
+            if angle_deg == 0.0:
+                print("[ANGLE_FINDER] Angle is 0.0 (contour not found) "
+                      "— asking operator")
+                angle_deg = self._ask_operator_angle(disp)
+                if angle_deg is None:
+                    # Оператор нажал 'Q' — прервать.
+                    print("[ANGLE_FINDER] Operator aborted (None)")
+                    return None
+
+            # 6. Конвертация в радианы и возврат.
+            yaw_rad = math.radians(angle_deg)
+            print(f"[ANGLE_FINDER] Final: angle={angle_deg}° "
+                  f"yaw={yaw_rad:.4f} rad")
+            return (yaw_rad, center_pixel, disp)
+
+        return finder
+
+    def _ask_operator_angle(self, image):
+        """Показывает окно «угол не найден» и спрашивает оператора.
+
+        Опции:
+          'C' — продолжить с углом 0.0 (без поворота)
+          'Q' — прервать траекторию
+          'M' — ввести угол вручную (через input() в консоли)
+
+        Args:
+            image: изображение (с красной точкой в центре) для фона окна.
+
+        Returns:
+            angle_deg (float) — выбранный угол, или None если оператор прервал ('Q').
+        """
+        disp = image.copy()
+
+        # Полупрозрачная тёмно-красная панель сверху.
+        overlay = disp.copy()
+        cv2.rectangle(overlay, (0, 0), (disp.shape[1], 110), (0, 0, 80), -1)
+        cv2.addWeighted(overlay, 0.65, disp, 0.35, 0, disp)
+
+        cv2.putText(disp, "ANGLE NOT FOUND (no contour / angle=0.0)",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        cv2.putText(disp, "Press 'C' = use 0.0,  'Q' = abort,  'M' = manual input",
+                    (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+        cv2.putText(disp, "(for 'M': enter angle in degrees in console)",
+                    (10, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+
+        cv2.imshow("Angle Not Found - Ask Operator", disp)
+        print("[ANGLE_FINDER] Showing 'angle not found' window. "
+              "Press 'C'=use 0, 'Q'=abort, 'M'=manual input")
+        key = cv2.waitKey(0) & 0xFF
+        cv2.destroyAllWindows()
+
+        if key in (ord('c'), ord('C')):
+            print("[ANGLE_FINDER] Operator chose: continue with angle=0.0")
+            return 0.0
+        elif key in (ord('q'), ord('Q')):
+            print("[ANGLE_FINDER] Operator chose: ABORT")
+            return None
+        elif key in (ord('m'), ord('M')):
+            # Ручной ввод угла через консоль.
+            try:
+                val = input("[ANGLE_FINDER] Enter angle in degrees (float): ").strip()
+                angle_manual = float(val)
+                print(f"[ANGLE_FINDER] Operator entered: {angle_manual}°")
+                return angle_manual
+            except (ValueError, EOFError) as e:
+                print(f"[ANGLE_FINDER] Invalid input: {e}. Using 0.0")
+                return 0.0
+        else:
+            # Любая другая клавиша — продолжить с 0 (мягкий fallback).
+            print(f"[ANGLE_FINDER] Unknown key — using 0.0")
+            return 0.0
 
     def run(self, pick_prompt=None, put_prompt=None):
         """Полный цикл: setup -> pick -> put -> cleanup."""
@@ -386,9 +565,10 @@ class PickAndPlacePipeline:
             print("-" * 60)
 
             # run_trajectory сам: делает свежий кадр → VLM trajectory →
-            # конвертация в пиксели/3D → угол lift → подтверждение оператором
-            # → robot.move_through_trajectory (с подтверждением КАЖДОГО шага
-            # движения).
+            # конвертация в пиксели/3D → верификация точек →
+            # robot.move_through_trajectory (движение над объект → поиск угла
+            # через callback → поворот → спуск → grip → middles → placement,
+            # с подтверждением КАЖДОГО шага оператором).
             ok = self.run_trajectory(step)
             if not ok:
                 print(f"\n[PIPELINE] Step {i}/{n} FAILED — aborting plan execution")

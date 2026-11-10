@@ -76,7 +76,7 @@ class VLMProcessor:
     # Низкоуровневый запрос
     # ------------------------------------------------------------------
     def send_request(self, prompt_text, image_data, task,
-                     do_sample=True, temperature=0.7, plot=False):
+                     do_sample=True, temperature=0.7, plot=False, validate=True):
         """Отправляет изображение + промпт в модель и возвращает
         (pred_text, annotated_image_or_None).
 
@@ -88,6 +88,11 @@ class VLMProcessor:
                                         может быть np.ndarray ИЛИ путём (str).
                                         Используется для task='planing'
                                         (REFERENCE + CURRENT).
+
+        Args:
+            validate: если False — пропустить Stage-2 QC (валидацию ответа).
+                      Используется в plan_task для ОДНОГО запуска модели
+                      (без повторного Stage-2 валидатора).
 
         Временные файлы и GPU-кэш чистятся в finally даже при падении инференса.
         """
@@ -123,6 +128,7 @@ class VLMProcessor:
         return self.model.inference(
             prompt_text, image_to_send, task=task,
             do_sample=do_sample, temperature=temperature, plot=plot,
+            validate=validate,
         )
 
     # ------------------------------------------------------------------
@@ -216,9 +222,16 @@ class VLMProcessor:
 
         # send_request сам приведёт np.ndarray / str к путям на диске и почистит
         # temp-файлы + GPU-кэш в finally.
+        #
+        # validate=False — пропустить Stage-2 QC (plan-specific валидатор).
+        # Раньше модель запускалась ДВАЖДЫ: Stage 1 (генерация плана) + Stage 2
+        # (валидация/реформатирование). Stage 2 не нужен — план из Stage 1
+        # уже достаточно хорошего качества, а повторный запуск модели
+        # занимает 10-15 секунд без реальной пользы.
         pred, _img = self.send_request(
             prompt, list(images), self.TASK_PLANING,
             do_sample=True, temperature=0.8, plot=plot,
+            validate=False,
         )
         if not pred:
             print("[VLM] No plan prediction")

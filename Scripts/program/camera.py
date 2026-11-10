@@ -215,6 +215,46 @@ class RealSenseCamera:
                 self.stop()
                 return (None, None, None), (None, None, None)
 
+    def capture_frame_now(self):
+        """Захват ОДНОГО кадра мгновенно, без окна стрима и без ожидания 'p'.
+
+        Используется для автоматизированного захвата ПОСЛЕ того как робот
+        приехал в позицию (например, "над объектом" для поиска угла через
+        callback в move_through_trajectory).
+
+        Pipeline остаётся запущенным после вызова (как и в capture_frame /
+        capture_two_frames) — полная остановка только в stop().
+
+        Returns:
+            (color_image, depth_image, intrin) или (None, None, None) при ошибке.
+        """
+        self._ensure_streaming()
+
+        # Берём один кадр. timeout_ms=5000 — достаточно для стабилизации
+        # после остановки робота (движение уже завершено, await_stop был вызван).
+        frames = self.pipeline.wait_for_frames(timeout_ms=5000)
+        if not frames:
+            print("[CAMERA] capture_frame_now: wait_for_frames timed out")
+            return None, None, None
+
+        aligned = self.align.process(frames)
+        color_frame = aligned.get_color_frame()
+        depth_frame = aligned.get_depth_frame()
+
+        if not color_frame or not depth_frame:
+            print("[CAMERA] capture_frame_now: no valid color/depth frame")
+            return None, None, None
+
+        color_image = np.asanyarray(color_frame.get_data())
+        depth_image = np.asanyarray(depth_frame.get_data())
+        intrin = (
+            depth_frame.get_profile()
+            .as_video_stream_profile()
+            .get_intrinsics()
+        )
+
+        print(f"[CAMERA] capture_frame_now: grabbed {color_image.shape[1]}x{color_image.shape[0]} frame")
+        return color_image.copy(), depth_image.copy(), intrin
 
     # ------------------------------------------------------------------
     # 3D-депроекция

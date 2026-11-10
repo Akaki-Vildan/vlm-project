@@ -8,7 +8,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R_scipy
 
 from pulseapi import RobotPulse, position, MT_LINEAR, MT_JOINT, tool_info
-from utils import DetectedObject, Point3D
+from utils import DetectedObject, Point3D, Point2D
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +220,101 @@ class RobotController:
 
         return (target_pos_base, output_rot, target_z)
 
-    def _move_to_z_offset(self, base_info, z_offset, tp):
-        """Двигаться в (xy, target_z + z_offset) с текущей ротацией.
+    def _camera_point_to_base_xyz(self, cam_point: Point3D):
+        """Конвертирует 3D-точку камеры в RAW 3D-точку базы (БЕЗ TARGET_OFFSET_Z).
+
+        В отличие от _camera_point_to_base (которая возвращает target_pos_base с
+        применённым TARGET_OFFSET_Z и clamp-ом), этот метод возвращает ИСХОДНУЮ
+        3D-точку в системе базы — как есть, без offset-ов.
+
+        Используется для ПРОЕКЦИИ известной 3D позиции объекта в новую позицию
+        камеры (когда робот уже приехал "над объект" и мы хотим найти пиксель
+        объекта на новом кадре, учитывая смещение камеры от TCP).
+
+        Возвращает np.array([x, y, z]) или None (если не удалось прочитать TCP).
+        """
+        try:
+            raw = self.robot.get_position()
+            current_pos = [raw.point.x, raw.point.y, raw.point.z]
+            roll, pitch, yaw = raw.rotation.roll, raw.rotation.pitch, raw.rotation.yaw
+        except Exception as e:
+            print(f"[ROBOT] _camera_point_to_base_xyz: get_position failed: {e}")
+            return None
+
+        # Camera -> TCP
+        point_cam_h = np.array([cam_point.x, cam_point.y, cam_point.z, 1.0])
+        point_tcp_xyz = (H_cam_to_tcp @ point_cam_h)[:3]
+
+        # TCP -> Base
+        rot_for_matrix = [roll, pitch, -yaw]
+        R_base_tcp = R_scipy.from_euler('xyz', rot_for_matrix, degrees=False).as_matrix()
+        point_base_offset = R_base_tcp @ point_tcp_xyz
+        point_base_xyz = np.array(current_pos) + point_base_offset
+
+        return point_base_xyz
+
+    def project_base_point_to_camera_pixel(self, point_base_xyz, intrin):
+        """Проецирует 3D-точку (в системе базы) в пиксель камеры, используя
+        ТЕКУЩУЮ позу TCP.
+
+        Учитывает смещение камеры от TCP (H_tcp_to_cam_file = [-0.014, 0.05853, 0.068]):
+        когда TCP стоит над объектом, камера смещена от него на эти значения
+        (в системе TCP), поэтому объект НЕ в центре кадра, а сдвинут.
+        Эта функция ТОЧНО вычисляет пиксель объекта через прямую проекцию 3D→2D.
+
+        Используется в angle_finder_callback: после того как робот приехал
+        к (lift_xy, z=0.4), проецирует известную 3D позицию объекта (lift_base_xyz,
+        посчитанную в HOME) в НОВЫЙ кадр камеры.
+
+        Args:
+            point_base_xyz: np.array([x, y, z]) — 3D точка в системе базы.
+            intrin: RealSense intrinsics (ppx, ppy, fx, fy).
+
+        Returns:
+            Point2D (пиксельные координаты) или None (точка за камерой / ошибка).
+        """
+        try:
+            raw = self.robot.get_position()
+            tcp_pos = [raw.point.x, raw.point.y, raw.point.z]
+            roll, pitch, yaw = raw.rotation.roll, raw.rotation.pitch, raw.rotation.yaw
+        except Exception as e:
+            print(f"[ROBOT] project_base_point_to_camera_pixel: get_position failed: {e}")
+            return None
+
+        # 1. base → TCP: точка в системе TCP
+        rot_for_matrix = [roll, pitch, -yaw]
+        R_base_tcp = R_scipy.from_euler('xyz', rot_for_matrix, degrees=False).as_matrix()
+        point_tcp = R_base_tcp.T @ (np.array(point_base_xyz) - np.array(tcp_pos))
+
+        # 2. TCP → camera: камера смещена от TCP на H_tcp_to_cam_file
+        #    (translation = [-0.014, 0.05853, 0.068], rotation = identity).
+        point_tcp_h = np.array([point_tcp[0], point_tcp[1], point_tcp[2], 1.0])
+        point_cam = (H_tcp_to_cam_file @ point_tcp_h)[:3]
+
+        # 3. Проверка: точка должна быть ПЕРЕД камерой (z > 0).
+        if point_cam[2] <= 0:
+            print(f"[ROBOT] project_base_point: point behind camera "
+                  f"(cam_z={point_cam[2]:.3f})")
+            return None
+
+        # 4. camera 3D → pixel (pinhole model без искажений — для центра кадра
+        #    искажения минимальны).
+        px = intrin.ppx + (point_cam[0] / point_cam[2]) * intrin.fx
+        py = intrin.ppy + (point_cam[1] / point_cam[2]) * intrin.fy
+
+        # Clamp в границы кадра (на всякий случай).
+        px = max(0, min(intrin.width - 1, int(round(px))))
+        py = max(0, min(intrin.height - 1, int(round(py))))
+
+        print(f"[ROBOT] project_base_point: base_xyz=({point_base_xyz[0]:.3f}, "
+              f"{point_base_xyz[1]:.3f}, {point_base_xyz[2]:.3f}) "
+              f"-> tcp=({point_tcp[0]:.3f}, {point_tcp[1]:.3f}, {point_tcp[2]:.3f}) "
+              f"-> cam=({point_cam[0]:.3f}, {point_cam[1]:.3f}, {point_cam[2]:.3f}) "
+              f"-> pixel=({px}, {py})")
+        return Point2D(x=px, y=py)
+
+    def _move_to_z_offset(self, base_info, z_offset, tp, rot_override=None):
+        """Двигаться в (xy, target_z + z_offset) с заданной ротацией.
 
         base_info: кортеж из _camera_point_to_base.
         z_offset: +0.05 (approach-5cm), +0.02 (approach-2cm),
@@ -229,9 +322,16 @@ class RobotController:
                   PLACEMENT_PLACE_Z_OFFSET (+0.001) для placement.
         tp: bool — если True, это endpoint (lift grip или placement place),
            у него не может быть отрицательная высота → clamp до 0.003.
+        rot_override: опционально [roll, pitch, yaw] — если передано,
+           используется ВМЕСТО output_rot из base_info. Нужно для LIFT-шагов
+           в новом потоке: lift_base считается с yaw=0 (угол ещё не известен),
+           а фактическое движение выполняется с yaw найденным позже через
+           angle_finder_callback.
         Возвращает [x, y, z] целевой позиции в базовой системе.
         """
         target_pos_base, output_rot, target_z = base_info
+        if rot_override is not None:
+            output_rot = rot_override
         target_z += z_offset
         if(target_z < 0 and tp == True):
             print('[ROBOT] this is a end point and z less then zero')
@@ -381,34 +481,44 @@ class RobotController:
         return False
 
     def move_through_trajectory(self, trajectory_camera_points, image=None,
-                                lift_angle_deg=0.0,
                                 lift_pixel=None, placement_pixel=None,
-                                middle_pixels=None):
-        """Выполняет траекторию: lift -> middle waypoints (z=0.4) -> placement.
+                                middle_pixels=None,
+                                angle_finder_callback=None):
+        """Выполняет траекторию с НОВЫМ потоком поиска угла ПОСЛЕ движения.
+
+        НОВЫЙ ПОТОК LIFT (угол ищется после движения робота над объект):
+          1. MOVE to "above object": (lift_xy, z=0.4) rot=[π, 0, -π/2] (HOME)
+          2. CALLBACK angle_finder(lift_base_xyz) → (yaw_rad, pixel, angle_img) или None
+             (pipeline внутри: capture_frame_now → ПРОЕКЦИЯ 3D lift_base_xyz в
+              пиксель через H_tcp_to_cam → cv2 контуры → если 0.0 → спросить оператора)
+          3. ROTATE in place: (lift_xy, z=0.4) rot=[π, 0, yaw_rad]
+          4. DESCEND +5cm: (lift_xy, target_z+0.05) rot=[π, 0, yaw_rad]
+          5. +2cm → grip → close  (как раньше, но с новым yaw)
+
+        MIDDLE waypoints и PLACEMENT остаются БЕЗ ИЗМЕНЕНИЙ (yaw=0).
 
         Перед КАЖДЫМ движением ждёт подтверждения оператора через _confirm_step.
-        В окне подтверждения рисуются lift (красный) и placement (синий) пиксели
-        и пишется целевая позиция робота в БАЗЕ — чтобы оператор видел
-        соответствие "пиксель на кадре ↔ куда едет робот".
 
         Контракт по waypoint-ам:
-          - trajectory_camera_points[0]  : lift  — подход + grip  (текущая логика pick).
-                                            Угол объекта (lift_angle_deg) применяется
-                                            ТОЛЬКО к этой позиции как yaw робота.
-                                            Финальное z-смещение: LIFT_GRIP_Z_OFFSET (-0.013).
+          - trajectory_camera_points[0]  : lift  — подход + grip.
+                                            Угол (yaw) находится через callback
+                                            ПОСЛЕ движения над объект.
+                                            Финальное z-смещение: LIFT_GRIP_Z_OFFSET.
           - trajectory_camera_points[1:-1]: middle — прямолинейное движение на z=0.4.
-          - trajectory_camera_points[-1] : placement — подход + release (текущая логика put).
+          - trajectory_camera_points[-1] : placement — подход + release.
                                             Угол = 0 (плейсмент не требует ориентации).
-                                            Финальное z-смещение: PLACEMENT_PLACE_Z_OFFSET (+0.001).
+                                            Финальное z-смещение: PLACEMENT_PLACE_Z_OFFSET.
 
         Args:
             trajectory_camera_points: list[Point3D] в координатах камеры, len >= 2.
-            image: опционально — кадр для окон подтверждения.
-            lift_angle_deg: угол объекта в градусах (например, из
-                            cam.find_angle_around_point). Применяется к lift-позиции.
-            lift_pixel:      Point2D пиксельных координат lift (для отрисовки).
+            image: опционально — кадр для окон подтверждения (HOME-кадр).
+            lift_pixel:      Point2D пиксельных координат lift на HOME-кадре (для отрисовки).
             placement_pixel: Point2D пиксельных координат placement (для отрисовки).
             middle_pixels:   list[Point2D] — пиксели middle waypoints (для отрисовки).
+            angle_finder_callback: callable () → (yaw_rad, center_pixel, angle_img) или None.
+                Вызывается ПОСЛЕ движения к "above object" (шаг 2).
+                Если None → yaw=0 (без поворота).
+                Если вернул None → оператор прервал → return False.
 
         Returns:
             True — траектория выполнена, False — прервана/ошибка.
@@ -425,18 +535,18 @@ class RobotController:
         placement_cam = trajectory_camera_points[-1]
         middle_cams = trajectory_camera_points[1:-1]
 
-        # Угол lift-позиции переводим в радианы и используем как yaw.
-        # Placement — yaw = 0.
-        lift_yaw_rad = math.radians(lift_angle_deg) if lift_angle_deg else 0.0
-        print(f"[ROBOT] Lift angle: {lift_angle_deg}° ({lift_yaw_rad:.4f} rad)")
-
         # === ТРАНСФОРМАЦИЯ: 3D камеры → база робота (camera_point_to_base) ===
         # ВАЖНО: ВСЕ base-координаты считаем ЗАРАНЕЕ, до любого движения.
         # _camera_point_to_base внутри вызывает self.robot.get_position() —
         # если робот уже поехал (к lift), то current_pos и R_base_tcp будут для
         # lift-позиции, а не для HOME (где был снят кадр) → координаты кривые.
         # Поэтому считаем ВСЁ с TCP в HOME (где сняли кадр = где captured image).
-        lift_base = self._camera_point_to_base(lift_cam, yaw_rad=lift_yaw_rad)
+        #
+        # НОВОЕ: lift_base считается с yaw=0.0 (угол ЕЩЁ НЕ НАЙДЕН — он будет
+        # найден через callback после движения над объект). xy и target_z НЕ
+        # зависят от yaw, поэтому считаются корректно. Фактическая ротация для
+        # LIFT-движений подставляется позже через rot_override=[π, 0, new_yaw].
+        lift_base = self._camera_point_to_base(lift_cam, yaw_rad=0.0)
         placement_base = self._camera_point_to_base(placement_cam, yaw_rad=0.0)
         middle_bases = []
         for mid_cam in middle_cams:
@@ -446,54 +556,146 @@ class RobotController:
             print("[ROBOT] Could not compute base positions for lift/placement")
             return False
 
-        # Reference pixels — отрисовываются в КАЖДОМ окне подтверждения,
-        # чтобы оператор видел, ОТКУДА взялась target_pos.
+        # RAW 3D позиция объекта в базе (без TARGET_OFFSET_Z) — для проекции
+        # в пиксель нового кадра после движения над объект.
+        # Вычисляется ТОЛЬКО для lift (placement не требует поиска угла).
+        # Считается при TCP в HOME (как lift_base), результат не зависит от yaw.
+        lift_base_xyz = self._camera_point_to_base_xyz(lift_cam)
+        if lift_base_xyz is None:
+            print("[ROBOT] WARNING: lift_base_xyz is None — projection will "
+                  "fall back to center of frame")
+        else:
+            print(f"[ROBOT] lift_base_xyz (raw, for projection): "
+                  f"({lift_base_xyz[0]:.3f}, {lift_base_xyz[1]:.3f}, {lift_base_xyz[2]:.3f})")
+
+        # Reference pixels — отрисовываются в КАЖДОМ окне подтверждения.
         ref_pixels = [
             (lift_pixel, "LIFT", (0, 0, 255)),       # красный
             (placement_pixel, "PLACE", (255, 0, 0)),# синий
         ]
 
-        # === LIFT: те же шаги, что и в execute_move для pick ===
-        print("[ROBOT] --- LIFT ---")
+        # ============================================================
+        # === ШАГ 1: MOVE to "above object" (lift_xy, z=0.4) ===
+        # ============================================================
+        # Робот едет НАД объект (безопасная высота 0.4м) с HOME ротацией.
+        # Камера eye-in-hand теперь смотрит на объект сверху.
+        print("[ROBOT] --- STEP 1: MOVE TO ABOVE OBJECT (z=0.4) ---")
+        above_xyz = [lift_base[0][0], lift_base[0][1], self.MIDDLE_WAYPOINT_Z]
+        above_rot = [math.pi, 0, -math.pi / 2]  # HOME rotation
+        if not self._confirm_step("MOVE above object (z=0.4)", image,
+                                  target_pos=above_xyz,
+                                  target_rot=above_rot,
+                                  reference_pixels=ref_pixels):
+            return False
+        print(f"[ROBOT] -> set_position: xyz=({above_xyz[0]:.3f}, {above_xyz[1]:.3f}, {above_xyz[2]:.3f}) "
+              f"rot=(r={above_rot[0]:.3f}, p={above_rot[1]:.3f}, y={above_rot[2]:.3f})")
+        self.robot.set_position(position(above_xyz, above_rot),
+                                tcp_max_velocity=self.move_velocity,
+                                motion_type=MT_LINEAR)
+        self.robot.await_stop()
+        time.sleep(0.5)
 
-        # Approach +5cm
+        # ============================================================
+        # === ШАГ 2: FIND ANGLE via callback ===
+        # ============================================================
+        # Pipeline захватывает новый кадр (камера теперь над объект),
+        # ПРОЕЦИРУЕТ известную 3D позицию объекта (lift_base_xyz) в пиксель
+        # нового кадра (учитывая смещение камеры от TCP через H_tcp_to_cam),
+        # ищет контур вокруг этого пикселя → угол.
+        # Если контур не найден (angle=0.0) → спрашивает оператора (C/Q/M).
+        print("[ROBOT] --- STEP 2: FIND ANGLE (callback) ---")
+        new_yaw_rad = 0.0
+        center_pixel = None
+        angle_img = None
+        if angle_finder_callback is not None:
+            try:
+                result = angle_finder_callback(lift_base_xyz)
+                if result is None:
+                    # Оператор прервал (нажал 'Q' в окне "angle not found").
+                    print("[ROBOT] Angle finder aborted by operator (None)")
+                    return False
+                new_yaw_rad, center_pixel, angle_img = result
+                yaw_deg = math.degrees(new_yaw_rad)
+                print(f"[ROBOT] Angle found: yaw={new_yaw_rad:.4f} rad ({yaw_deg:.2f}°)")
+            except Exception as e:
+                print(f"[ROBOT] Angle finder raised exception: {e}")
+                print("[ROBOT] Using yaw=0 as fallback")
+                new_yaw_rad = 0.0
+        else:
+            print("[ROBOT] No angle_finder_callback provided — using yaw=0")
+
+        # Лифт-ротация: roll=π, pitch=0, yaw=новый угол.
+        lift_rot = [math.pi, 0, new_yaw_rad]
+        lift_angle_deg_for_draw = math.degrees(new_yaw_rad)
+
+        # ============================================================
+        # === ШАГ 3: ROTATE in place (apply yaw) ===
+        # ============================================================
+        # Поворот на месте (та же позиция z=0.4), но с новым yaw.
+        print("[ROBOT] --- STEP 3: ROTATE (apply yaw) ---")
+        rotate_xyz = list(above_xyz)  # та же позиция
+        rotate_rot = lift_rot
+        if not self._confirm_step(
+            f"ROTATE to yaw={lift_angle_deg_for_draw:.1f}°",
+            image,
+            target_pos=rotate_xyz,
+            target_rot=rotate_rot,
+            reference_pixels=ref_pixels,
+            lift_angle_deg=lift_angle_deg_for_draw,
+        ):
+            return False
+        print(f"[ROBOT] -> set_position: xyz=({rotate_xyz[0]:.3f}, {rotate_xyz[1]:.3f}, {rotate_xyz[2]:.3f}) "
+              f"rot=(r={rotate_rot[0]:.3f}, p={rotate_rot[1]:.3f}, y={rotate_rot[2]:.3f})")
+        self.robot.set_position(position(rotate_xyz, rotate_rot),
+                                tcp_max_velocity=self.move_velocity,
+                                motion_type=MT_LINEAR)
+        self.robot.await_stop()
+        time.sleep(0.5)
+
+        # ============================================================
+        # === LIFT: descend + grip (с новым yaw) ===
+        # ============================================================
+        print("[ROBOT] --- LIFT (descend with new yaw) ---")
+
+        # Approach +5cm — DESCEND к 5см над объект (замена старого approach+5cm
+        # с HOME rotation; теперь ротация = новый yaw).
         target = self._compute_target_xyz(lift_base, +0.05)
         if not self._confirm_step("LIFT approach +5cm", image,
                                   target_pos=target,
-                                  target_rot=[math.pi, 0, -math.pi / 2],
+                                  target_rot=lift_rot,
                                   reference_pixels=ref_pixels,
-                                  lift_angle_deg=lift_angle_deg):
+                                  lift_angle_deg=lift_angle_deg_for_draw):
             return False
-        self._move_to_z_offset(lift_base, +0.05, False)
+        self._move_to_z_offset(lift_base, +0.05, False, rot_override=lift_rot)
 
         # Approach +2cm
         target = self._compute_target_xyz(lift_base, +0.02)
         if not self._confirm_step("LIFT approach +2cm", image,
                                   target_pos=target,
-                                  target_rot=lift_base[1],
+                                  target_rot=lift_rot,
                                   reference_pixels=ref_pixels,
-                                  lift_angle_deg=lift_angle_deg):
+                                  lift_angle_deg=lift_angle_deg_for_draw):
             return False
-        self._move_to_z_offset(lift_base, +0.02, False)
+        self._move_to_z_offset(lift_base, +0.02, False, rot_override=lift_rot)
 
-        # Grip depth — LIFT_GRIP_Z_OFFSET = -0.013 (опускаемся ниже target_z на 1.3 см,
-        # чтобы гриппер обхватил объект).
+        # Grip depth — LIFT_GRIP_Z_OFFSET.
         target = self._compute_target_xyz(lift_base, self.LIFT_GRIP_Z_OFFSET)
         if not self._confirm_step(
             f"LIFT descend to grip ({self.LIFT_GRIP_Z_OFFSET*100:+.1f}cm)",
             image,
             target_pos=target,
-            target_rot=lift_base[1],
+            target_rot=lift_rot,
             reference_pixels=ref_pixels,
-            lift_angle_deg=lift_angle_deg,
+            lift_angle_deg=lift_angle_deg_for_draw,
         ):
             return False
-        self._move_to_z_offset(lift_base, self.LIFT_GRIP_Z_OFFSET, False)
+        self._move_to_z_offset(lift_base, self.LIFT_GRIP_Z_OFFSET, False,
+                               rot_override=lift_rot)
 
         # Close gripper
         if not self._confirm_step("Close gripper (pick)", image,
                                   reference_pixels=ref_pixels,
-                                  lift_angle_deg=lift_angle_deg):
+                                  lift_angle_deg=lift_angle_deg_for_draw):
             return False
         time.sleep(0.5)
         self.robot.set_digital_output_high(1)      # close gripper
@@ -525,7 +727,7 @@ class RobotController:
                 target_pos=mid_xyz,
                 target_rot=output_rot,
                 reference_pixels=mid_ref,
-                lift_angle_deg=lift_angle_deg,
+                lift_angle_deg=lift_angle_deg_for_draw,
             ):
                 return False
             print(f"[ROBOT] --- MIDDLE {i+1}/{len(middle_cams)} -> z={self.MIDDLE_WAYPOINT_Z} ---")
@@ -545,9 +747,9 @@ class RobotController:
                                   target_pos=target,
                                   target_rot=placement_base[1],
                                   reference_pixels=ref_pixels,
-                                  lift_angle_deg=lift_angle_deg):
+                                  lift_angle_deg=lift_angle_deg_for_draw):
             return False
-        self._move_to_z_offset(placement_base, +0.05, True)
+        
 
         # Approach +2cm
         target = self._compute_target_xyz(placement_base, +0.02)
@@ -555,12 +757,11 @@ class RobotController:
                                   target_pos=target,
                                   target_rot=placement_base[1],
                                   reference_pixels=ref_pixels,
-                                  lift_angle_deg=lift_angle_deg):
+                                  lift_angle_deg=lift_angle_deg_for_draw):
             return False
         self._move_to_z_offset(placement_base, +0.02, True)
 
-        # Place depth — PLACEMENT_PLACE_Z_OFFSET = +0.001 (чуть выше target_z на 1 мм,
-        # чтобы мягко положить объект на поверхность, не вдавливая в стол).
+        # Place depth — PLACEMENT_PLACE_Z_OFFSET.
         target = self._compute_target_xyz(placement_base, self.PLACEMENT_PLACE_Z_OFFSET)
         if not self._confirm_step(
             f"PLACEMENT place ({self.PLACEMENT_PLACE_Z_OFFSET*100:+.1f}cm)",
@@ -568,7 +769,7 @@ class RobotController:
             target_pos=target,
             target_rot=placement_base[1],
             reference_pixels=ref_pixels,
-            lift_angle_deg=lift_angle_deg,
+            lift_angle_deg=lift_angle_deg_for_draw,
         ):
             return False
         self._move_to_z_offset(placement_base, self.PLACEMENT_PLACE_Z_OFFSET, True)
@@ -576,7 +777,7 @@ class RobotController:
         # Open gripper
         if not self._confirm_step("Open gripper (release)", image,
                                   reference_pixels=ref_pixels,
-                                  lift_angle_deg=lift_angle_deg):
+                                  lift_angle_deg=lift_angle_deg_for_draw):
             return False
         time.sleep(0.5)
         self.robot.set_digital_output_low(1)            # open gripper
@@ -587,6 +788,8 @@ class RobotController:
         if not self._confirm_step("Return to HOME", image,
                                   reference_pixels=ref_pixels):
             return False
+        
+        self._move_to_z_offset(placement_base, +0.4, True)
         self.go_home()
         return True
 
